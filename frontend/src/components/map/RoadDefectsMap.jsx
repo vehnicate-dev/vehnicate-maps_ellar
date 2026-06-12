@@ -5,13 +5,13 @@ import * as h3 from "h3-js";
 import { createClient } from "@supabase/supabase-js";
 
 // ─── Supabase config ──────────────────────────────────────────────────────────
-const SUPABASE_URL = "https://yickjqlccukcgdnagzav.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlpY2tqcWxjY3VrY2dkbmFnemF2Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MzEzNDIxNiwiZXhwIjoyMDg4NzEwMjE2fQ.1X5rcMZkzamNvnsplCEPyNfQhhbPeSnvJdgGGmRHwpw";
+const SUPABASE_URL = "https://mmjusghgeedycrrfdejg.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1tanVzZ2hnZWVkeWNycmZkZWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTQwMjM2MCwiZXhwIjoyMDkwOTc4MzYwfQ.iPNrIQbKZy3seMcP6dY76uRg-BAYFkGEMDhoN8o1ng8";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const H3_RES = 8;
-const CITIES = ["Chennai", "Surat", "Bangalore", "Mumbai", "Hyderabad"];
+const CITIES = ["Chennai", "Surat", "Bangalore", "Mumbai", "Hyderabad", "Pune", "Kolkata"];
 // Clone first item at end so the scroll from last→first looks continuous
 const CITIES_LOOP = [...CITIES, CITIES[0]];
 
@@ -69,38 +69,135 @@ async function fetchEventsForCells(cells, cachedCells) {
   return results.flat();
 }
 
-async function fetchImagesForEvents(eventIds) {
+// ─── Supabase fetchers ────────────────────────────────────────────────────────
+
+async function fetchFramesForEvents(eventIds) {
   if (!eventIds.length) return {};
-  const { data, error } = await supabase
-    .from("images")
-    .select("event_id, image_url, timestamp")
-    .in("event_id", eventIds);
-  if (error) { console.error("[supabase] images:", error); return {}; }
+
+  const { data: events, error: evErr } = await supabase
+    .from("imu_events")
+    .select("id, session_id, start_time, end_time")
+    .in("id", eventIds);  // imu_events PK is "id", not "event_id"
+  if (evErr) { console.error("[supabase] imu_events:", evErr); return {}; }
+
   const map = {};
-  for (const row of data || []) {
-    if (!map[row.event_id]) map[row.event_id] = [];
-    map[row.event_id].push({ url: row.image_url, timestamp: row.timestamp }); // store both
-  }
+  await Promise.all(
+    (events || []).map(async (ev) => {
+      const startMs = new Date(ev.start_time).getTime();
+      const endMs   = new Date(ev.end_time).getTime();
+
+      const { data: frames, error: frErr } = await supabase
+        .from("frames")
+        .select("frame_id, session_id, timestamp_ms, image_path")
+        .eq("session_id", ev.session_id)
+        .gte("timestamp_ms", startMs - 3500)
+        .lte("timestamp_ms", endMs + 1000)
+        .order("timestamp_ms", { ascending: true })
+        .limit(8);
+      if (frErr) { console.error("[supabase] frames:", frErr); return; }
+
+      map[ev.id] = (frames || []).map(f => ({
+        url: f.image_path,
+        timestamp_ms: f.timestamp_ms,
+      }));
+    })
+  );
   return map;
 }
 
-// ─── Popup HTML (click → images) ─────────────────────────────────────────────
-function buildImagePopupHTML(row, param, imgs) {
+// ─── Canvas watermark helper ──────────────────────────────────────────────────
+// Loads an image URL, rotates and watermarks it, returns a data URL.
+// rotation: degrees CLOCKWISE (default 0)...
+function applyWatermark(url, timestamp_ms, rotation = 90) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      // ── rotate ──────────────────────────────────────────────────────────────
+      const rad = (rotation * Math.PI) / 180;
+      const sin = Math.abs(Math.sin(rad));
+      const cos = Math.abs(Math.cos(rad));
+      const W = Math.round(img.width * cos + img.height * sin);
+      const H = Math.round(img.width * sin + img.height * cos);
+
+      const canvas = document.createElement("canvas");
+      canvas.width  = W;
+      canvas.height = H;
+      const ctx = canvas.getContext("2d");
+      ctx.translate(W / 2, H / 2);
+      ctx.rotate(rad);
+      ctx.drawImage(img, -img.width / 2, -img.height / 2);
+      ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform
+
+      // ── watermark ───────────────────────────────────────────────────────────
+      const dt = new Date(timestamp_ms);
+      const pad = (n) => String(n).padStart(2, "0");
+      const dtStr =
+        `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())} ` +
+        `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}.` +
+        String(dt.getMilliseconds()).padStart(3, "0");
+      const lines = [dtStr, "captured by vehnicate"];
+
+      let fontSize = Math.round(H * 0.035);
+      const minFont = 12;
+      const maxLineW = W * 0.45;
+      ctx.font = `${fontSize}px monospace`;
+      while (fontSize > minFont) {
+        const widest = Math.max(...lines.map(l => ctx.measureText(l).width));
+        if (widest <= maxLineW) break;
+        fontSize -= 2;
+        ctx.font = `${fontSize}px monospace`;
+      }
+
+      const lineH   = fontSize * 1.35;
+      const padding = 20;
+      const offsets = [[2,2],[-2,-2],[2,-2],[-2,2],[0,2],[2,0],[-2,0],[0,-2]];
+
+      ctx.font      = `${fontSize}px monospace`;
+      ctx.textBaseline = "top";
+
+      lines.forEach((line, i) => {
+        const y = padding + i * lineH;
+        // shadow / outline
+        ctx.fillStyle = "rgba(0,0,0,0.9)";
+        offsets.forEach(([ox, oy]) => ctx.fillText(line, padding + ox, y + oy));
+        // white text
+        ctx.fillStyle = "white";
+        ctx.fillText(line, padding, y);
+      });
+
+      resolve(canvas.toDataURL("image/jpeg", 0.88));
+    };
+    img.onerror = () => resolve(url); // fallback: use original
+    img.src = url;
+  });
+}
+
+// ─── Popup HTML — images are injected after async watermark processing ────────
+async function buildImagePopupHTML(row, param, frames) {
   const color   = getEventColor(param);
   const lastEid = row.event_id[row.event_id.length - 1];
-
-  // Use timestamp from the first image if available
-  const timestamp = imgs.length > 0
-    ? imgs[0].timestamp.slice(0, 19).replace("T", " ")
+  const tsStr   = frames.length > 0
+    ? (() => {
+        const d = new Date(frames[0].timestamp_ms);
+        const p = (n) => String(n).padStart(2,"0");
+        return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} `+
+              `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+      })()
     : null;
+
+  // Process all frames through watermark in parallel
+  const processed = await Promise.all(
+    frames.slice(0, 8).map(f => applyWatermark(f.url, f.timestamp_ms))
+  );
 
   let html = `<div style="font-family:monospace;max-width:500px;">`;
   html += `
     <div style="border-left:3px solid ${color};padding:8px 12px;
       margin-bottom:10px;background:rgba(255,255,255,0.04);border-radius:0 6px 6px 0;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        ${timestamp
-          ? `<span style="font-size:11px;color:#ccc;">${timestamp}</span>`
+        ${tsStr
+          ? `<span style="font-size:11px;color:#ccc;">${tsStr}</span>`
           : `<span style="font-size:11px;color:#ccc;">Event ${lastEid}</span>`}
         <span style="font-size:12px;font-weight:700;color:${color};
           background:rgba(0,0,0,0.3);padding:2px 8px;border-radius:99px;">
@@ -108,16 +205,16 @@ function buildImagePopupHTML(row, param, imgs) {
         </span>
       </div>`;
 
-  if (imgs.length > 0) {
+  if (processed.length > 0) {
     html += `<div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:6px;
       scrollbar-width:thin;scrollbar-color:#fff transparent;">`;
-    for (const img of imgs.slice(0, 8)) {
-      html += `<img src="${img.url}" style="height:120px;border-radius:6px;flex-shrink:0;
-        object-fit:cover;cursor:pointer;" onclick="window.open('${img.url}','_blank')"/>`;
+    for (const dataUrl of processed) {
+      html += `<img src="${dataUrl}" style="height:120px;border-radius:6px;flex-shrink:0;
+        object-fit:cover;cursor:pointer;" onclick="window.open('${dataUrl}','_blank')"/>`;
     }
     html += `</div>`;
   } else {
-    html += `<div style="font-size:11px;color:#555;font-style:italic;">No images</div>`;
+    html += `<div style="font-size:11px;color:#555;font-style:italic;">No frames</div>`;
   }
 
   html += `</div></div>`;
@@ -130,7 +227,7 @@ function buildHoverHTML(row, param) {
   return `
     <div style="font-family:monospace;font-size:12px;min-width:180px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-        <span style="color:#ccc;font-weight:600;">Event ID</span>
+        <span style="color:#ccc;font-weight:600;">Event ID: </span>
         <span style="color:#fff;">${lastEid}</span>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
@@ -617,8 +714,8 @@ export default function RoadDefectsMap() {
       if (!newEvents.length) return;
 
       const allEventIds = newEvents.map((e) => e.event_id[e.event_id.length - 1]);
-      const newImages = await fetchImagesForEvents(allEventIds);
-      Object.assign(imageCacheRef.current, newImages);
+      const newFrames = await fetchFramesForEvents(allEventIds);
+      Object.assign(imageCacheRef.current, newFrames);
 
       const byHex = {};
       for (const ev of newEvents) {
@@ -696,14 +793,10 @@ export default function RoadDefectsMap() {
       // Click → image popup using last event_id
       marker.on("click", async () => {
         if (!imageCacheRef.current[lastEid]) {
-          Object.assign(imageCacheRef.current, await fetchImagesForEvents([lastEid]));
+          Object.assign(imageCacheRef.current, await fetchFramesForEvents([lastEid]));
         }
-        marker
-          .bindPopup(buildImagePopupHTML(row, param, imageCacheRef.current[lastEid] || []), {
-            maxWidth: 520,
-            maxHeight: 460,
-          })
-          .openPopup();
+        const html = await buildImagePopupHTML(row, param, imageCacheRef.current[lastEid] || []);
+        marker.bindPopup(html, { maxWidth: 520, maxHeight: 460 }).openPopup();
       });
 
       marker.addTo(map);
@@ -745,8 +838,8 @@ export default function RoadDefectsMap() {
 
       if (newEvents.length) {
         const allEventIds = newEvents.map((e) => e.event_id[e.event_id.length - 1]);
-        const newImages = await fetchImagesForEvents(allEventIds);
-        Object.assign(imageCacheRef.current, newImages);
+        const newFrames = await fetchFramesForEvents(allEventIds);
+        Object.assign(imageCacheRef.current, newFrames);
 
         const byHex = {};
         for (const ev of newEvents) {

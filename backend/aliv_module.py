@@ -205,8 +205,8 @@ class AlivRoadDefects:
         df_resampled['time_ms'] = (df_resampled.index * (1000.0 / self.fs)).astype(int)
         df = df_resampled
 
-        filt_pitch = self.butter_bandpass(df['Pitch'].values, 0.56, 1)
-        #print("filt_pitch length:", len(filt_pitch))  # ← add here
+        filt_pitch = self.butter_bandpass(df['Pitch'].values, 0.56, 1.0) # 0.56, 1->0.8->0.7->0.6->0.66->0.65->1
+        #print("filt_pitch length:", len(filt_pitch))
         #print("df length after resample:", len(df))
         if len(filt_pitch) < 100:
             return {'speedbreakers': []}
@@ -218,11 +218,7 @@ class AlivRoadDefects:
         df_f = pd.DataFrame({'Pitch': filt_pitch, 'gyro_y': gyro_y, 'time_ms': time_f})
 
         chunks = self.Chunking(df_f, 'Pitch', 'gyro_y')
-        s = np.std(filt_pitch)
-        #print("filt_pitch length after trim:", len(filt_pitch))
-        #print("std of filt_pitch:", s)
-        #print("chunks count:", len(chunks))
-        #print("initialLat:", initialLat, "initialLon:", initialLon)
+        s = np.std(filt_pitch) * 1.40 #(1.0->1.50->1.25->1.50->1.40)
         events, buf, active = [], [], False
 
         raw_time = df['time_ms'].values
@@ -244,7 +240,7 @@ class AlivRoadDefects:
 
                     dp = np.max(filt_pitch[si:ei+1]) - np.min(filt_pitch[si:ei+1])
                     stdp = np.std(filt_pitch[si:ei+1])
-                    gymax = np.max(gyro_y[si:ei+1])
+                    gymax = np.max(np.abs(gyro_y[si:ei+1]))
                     dpOG = np.max(raw_pitch[rs:re+1]) - np.min(raw_pitch[rs:re+1])
 
                     p = ((dpOG + dp) / 2) * gymax * stdp

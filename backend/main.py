@@ -2,75 +2,216 @@ from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 import pandas as pd
 from supabase import create_client
-from aliv_module import AlivRoadDefects  # your file
-from datetime import timedelta
+from aliv_module import AlivRoadDefects
 import h3 as h3lib
 import os
 from dotenv import load_dotenv
-import requests
-from PIL import Image, ImageDraw, ImageFont
-import io
 from hexagons_update import update_hexagons
+from zoneinfo import ZoneInfo
+import math
 
+
+IST = ZoneInfo("Asia/Kolkata")
 """
-each time a new row comes into the "trips" table, a https request is triggered via ngrok
-and the vehicleid, starttime & endtime are sent as a response.
+Each time a new row is inserted into the "sessions" table, a HTTPS request is triggered
+via ngrok carrying session_id, vehicle_id, start_time & end_time.
 |
 ↓
-These 3 values are later used by the process_trip() function to retrieve IMU + gps data from the
-datatransmission table and this raw data is fed into Aliv for road defects.
+process_trip() fetches IMU rows from imu_data and GPS rows from gps_data (both keyed by
+session_id), merges them on nearest timestamp_ms, then feeds the combined rows into Aliv
+for road defect detection.
+
+Column mapping summary
+──────────────────────
+imu_data  : accel_x/y/z  → renamed to accelx/y/z    (Aliv key)
+            gyro_x/y/z   → renamed to gyrox/y/z      (Aliv key)
+            user_accel_x → renamed to useraccelx      (Aliv key, no underscore!)
+            created_at   → mapped to 'timestamp'      (Aliv time key)
+gps_data  : latitude, longitude, speed               (Aliv uses these directly)
+
+Aliv time output
+────────────────
+Aliv rebuilds time_ms internally from 'timestamp' (pd.to_datetime), resamples at 1000/fs ms
+intervals, then trims 50 samples off both ends. Its output start_time / end_time are offsets
+(in ms) from that internal axis.
+To convert back to absolute wall-clock time:
+    absolute = timesent_T0 + pd.to_timedelta(aliv_ms + TRIM_OFFSET_MS, unit='ms')
+where TRIM_OFFSET_MS = 50 * (1000 / fs) = 625 ms at fs=80.
 """
-load_dotenv()  # reads the .env file
+
+load_dotenv()
 
 SOURCE_URL = os.environ.get("SOURCE_URL")
 SOURCE_KEY = os.environ.get("SOURCE_KEY")
 TARGET_URL = os.environ.get("TARGET_URL")
 TARGET_KEY = os.environ.get("TARGET_KEY")
 
+# Must match AlivRoadDefects(fs=…) below
+#ALIV_FS          = 40 # previously 80
+#ALIV_TRIM        = 50                              # samples trimmed from each end
+#ALIV_TRIM_OFFSET = ALIV_TRIM * (1000 / ALIV_FS)   # 625 ms at fs=80
+
 app = FastAPI()
 
-class TripRecord(BaseModel):
-    tripid: int
-    vehicleid: int
-    starttime: str
-    endtime: str
-    startx: float
-    starty: float
-    startz: float
+
+# ── Pydantic models ────────────────────────────────────────────────────────────
+
+class SessionRecord(BaseModel):
+    session_id: str
+    user_id: str
+    vehicle_id: int
+    start_time: str
+    end_time: str
+    status: str
     distance: float
+    created_at: str
 
 class WebhookPayload(BaseModel):
     type: str
     table: str
     schema: str
-    record: TripRecord
+    record: SessionRecord
 
-# for  deriving the absolute timestamps and lat&lon from the output that aliv gives i.e.,
-# relative timestamps (in ms) corresponding to the events.
-def enrich_events(tripid, vehicleid, result, df, rotation_angle):
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def fetch_all_pages(
+    supabase_client,
+    table: str,
+    filters: list,
+    order_col: str,
+    page_size: int = 1000,
+) -> list:
+    """Paginated fetch from a Supabase table.
+
+    filters is a list of (method_name, *args) tuples applied to the query,
+    e.g. [("eq", "session_id", sid)].
+    """
+    all_data = []
+    start = 0
+    while True:
+        query = supabase_client.table(table).select("*")
+        for method, *args in filters:
+            query = getattr(query, method)(*args)
+        batch = (
+            query
+            .order(order_col, desc=False)
+            .range(start, start + page_size - 1)
+            .execute()
+        ).data
+
+        if not batch:
+            break
+
+        all_data.extend(batch)
+
+        if len(batch) < page_size:
+            break
+
+        start += page_size
+
+    print(f"[fetch_all_pages] {table}: total rows fetched = {len(all_data)}")
+    return all_data
+
+def sanitize_for_json(obj):
+    if isinstance(obj, float) and math.isnan(obj):
+        return None
+    if isinstance(obj, list):
+        return [sanitize_for_json(i) for i in obj]
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    return obj
+
+def merge_gps_into_imu(imu_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFrame:
+    """Attach the nearest GPS fix to every IMU row via an asof join on timestamp_ms."""
+    imu_df = imu_df.sort_values("timestamp_ms").reset_index(drop=True)
+    gps_df = gps_df.sort_values("timestamp_ms").reset_index(drop=True)
+    return pd.merge_asof(
+        imu_df,
+        gps_df[["timestamp_ms", "latitude", "longitude", "speed", "bearing"]],
+        on="timestamp_ms",
+        direction="nearest",
+    )
+
+
+def build_aliv_input(df: pd.DataFrame) -> list[dict]:
+    """
+    Rename columns to the keys Aliv's _normalize_row_keys() recognises and
+    add a 'timestamp' column (ISO string) so Aliv can derive its internal time axis.
+
+    Aliv key lookup (from _normalize_row_keys):
+        accel  → 'acc_x' | 'accelx' | 'acceleration_x'   ← we use accelx
+        gyro   → 'gyro_x' | 'gyrox' | 'rotation_x'       ← we use gyrox
+        user   → 'useraccelx'  (NO underscore)
+        time   → 'timesent' | 'timestamp'                 ← we use timestamp
+        lat    → 'latitude' | 'lat'                       ← already named correctly
+        lon    → 'longitude' | 'lon'                      ← already named correctly
+        speed  → 'speed'                                   ← already named correctly
+    """
+    df = df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp_ms"], unit="ms", utc=True)
+    renamed = df.rename(columns={
+        "accel_x":     "accelx",
+        "accel_y":     "accely",
+        "accel_z":     "accelz",
+        "gyro_x":      "gyrox",
+        "gyro_y":      "gyroy",
+        "gyro_z":      "gyroz",
+        "user_accel_x": "useraccelx",   # NOTE: no underscore – Aliv looks for 'useraccelx'
+        "user_accel_y": "useraccely",
+        "user_accel_z": "useraccelz",
+    })
+    return renamed.to_dict(orient="records")
+
+'''
+def aliv_ms_to_absolute(aliv_ms: float, timesent_T0: pd.Timestamp, aliv_trim_offset: float) -> pd.Timestamp:
+    """
+    Convert an Aliv output time value (ms offset in its resampled+trimmed space)
+    back to an absolute UTC timestamp.
+
+        absolute = T0 + TRIM_OFFSET + aliv_ms
+    """
+    return timesent_T0 + pd.to_timedelta(aliv_trim_offset + aliv_ms, unit="ms")
+'''
+
+def enrich_events(
+    session_id: str,
+    vehicle_id: int,
+    user_id: str,
+    result: dict,
+    df: pd.DataFrame,
+    timesent_T0: pd.Timestamp,
+    aliv_trim_offset
+) -> list:
+    """
+    Map Aliv's relative-time events back to absolute UTC timestamps and GPS coordinates
+    using the merged IMU+GPS DataFrame.
+
+    Matching strategy: convert Aliv's start/end ms to absolute timestamps, then find
+    the nearest rows in the raw df by created_at (UTC).
+    """
     enriched = []
 
-    for event in result["speedbreakers"]:
-        start_time = event["start_time"]
-        end_time = event["end_time"]
+    for event in result.get("speedbreakers", []):
+        abs_start_ms = timesent_T0 + pd.to_timedelta(aliv_trim_offset + event["start_time"], unit="ms")
+        abs_end_ms   = timesent_T0 + pd.to_timedelta(aliv_trim_offset + event["end_time"],   unit="ms")
 
-        # Filter raw data within time range
+        abs_start_ms_int = int(abs_start_ms.timestamp() * 1000)
+        abs_end_ms_int   = int(abs_end_ms.timestamp() * 1000)
+
         subset = df[
-            (df["time_ms"] >= start_time) &
-            (df["time_ms"] <= end_time)
+            (df["timestamp_ms"] >= abs_start_ms_int) &
+            (df["timestamp_ms"] <= abs_end_ms_int)
         ]
 
         if subset.empty:
-            continue
+            mid_ms = (abs_start_ms_int + abs_end_ms_int) // 2
+            idx = (df["timestamp_ms"] - mid_ms).abs().idxmin()
+            subset = df.iloc[[idx]]
 
-        # 🔹 Extract values
-        start_timestamp = subset["timesent"].iloc[0]
-        end_timestamp = subset["timesent"].iloc[-1]
+        start_time = pd.to_datetime(subset["timestamp_ms"].iloc[0], unit="ms", utc=True)
+        end_time   = pd.to_datetime(subset["timestamp_ms"].iloc[-1], unit="ms", utc=True)
 
-        start_time_ms = int(subset["time_ms"].iloc[0])
-        end_time_ms = int(subset["time_ms"].iloc[-1])
-
-        # 🔹 Get lat/lon pairs (chronological + unique)
         lat_lon = (
             subset[["latitude", "longitude"]]
             .dropna()
@@ -78,198 +219,129 @@ def enrich_events(tripid, vehicleid, result, df, rotation_angle):
             .values
             .tolist()
         )
+        if not lat_lon:
+            continue
+
         first_lat, first_lon = lat_lon[0][0], lat_lon[0][1]
         h3_index = h3lib.latlng_to_cell(first_lat, first_lon, 8)
+
         enriched.append({
-            "vehicleid": vehicleid,
-            "tripid": tripid,
-            "h3_index": h3_index,
-            "start_timestamp": start_timestamp.isoformat(),
-            "end_timestamp": end_timestamp.isoformat(),
-            "parameter": event["parameter"],
-            "path": lat_lon,
-            "start_time_ms": start_time_ms,
-            "end_time_ms": end_time_ms,
-            "rotation_angle": rotation_angle
+            "user_id":    user_id,
+            "vehicle_id": vehicle_id,
+            "session_id": session_id,
+            "h3_index":   h3_index,
+            "start_time": pd.to_datetime(start_time, utc=True).astimezone(IST).isoformat(),
+            "end_time":   pd.to_datetime(end_time, utc=True).astimezone(IST).isoformat(),
+            "parameter":  event["parameter"],
+            "path":       lat_lon
         })
 
     return enriched
 
-def aliv_roadDefects(rows):
-    aliv = AlivRoadDefects(verbose=False, fs=80)
+def estimate_fs(df: pd.DataFrame, time_col: str = "timestamp_ms") -> int:
+    diffs = df[time_col].diff().dropna()
+    median_gap_ms = diffs.median()
+    fs = round(1000 / median_gap_ms)
+    print(f"[estimate_fs] median gap={median_gap_ms:.2f}ms → fs={fs}Hz")
+    return fs
 
+def run_aliv(rows: list, fs: int) -> dict:
+    aliv = AlivRoadDefects(verbose=False, fs=fs)
     result = aliv.analyze_batch(rows)
-    #print("ALIv result:", result)
-    print("Speedbreakers found:", len(result.get("speedbreakers", [])))
+    print(f"[aliv] Speedbreakers found: {len(result.get('speedbreakers', []))}")
     return result
 
-def process_trip(tripid,vehicleid, starttime, endtime):
-    print("Starting heavy processing")
+
+# ── Core processing ────────────────────────────────────────────────────────────
+
+def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str, end_time: str):
+    print(f"[process_trip] session={session_id} vehicle={vehicle_id} user={user_id} {start_time} → {end_time}")
 
     supabase_source = create_client(SOURCE_URL, SOURCE_KEY)
     supabase_target = create_client(TARGET_URL, TARGET_KEY)
 
-    all_data = []
-    page_size = 5000
-    start = 0
-
-    while True:
-        response = (
-            supabase_source
-            .table("datatransmission")
-            .select("*")
-            .eq("vehicleid", vehicleid)
-            .gte("timesent", starttime)
-            .lte("timesent", endtime)
-            .order("timesent", desc=False)
-            .range(start, start + page_size - 1)
-            .execute()
-        )
-
-        batch = response.data
-
-        if not batch:
-            break
-
-        all_data.extend(batch)
-        start += page_size
-
-    print("Total rows fetched:", len(all_data))
-
-    if len(all_data) == 0:
-        print("No data found, skipping")
+    # ── 1. Fetch IMU data ──────────────────────────────────────────────────────
+    imu_rows = fetch_all_pages(
+        supabase_source,
+        table="imu_data",
+        filters=[("eq", "session_id", session_id)],
+        order_col="timestamp_ms",
+    )
+    print(f"[process_trip] IMU rows fetched: {len(imu_rows)}")
+    if not imu_rows:
+        print("[process_trip] No IMU data, skipping.")
         return
 
-    # 🔹 Convert to DataFrame
-    df = pd.DataFrame(all_data)
+    # ── 2. Fetch GPS data ──────────────────────────────────────────────────────
+    gps_rows = fetch_all_pages(
+        supabase_source,
+        table="gps_data",
+        filters=[("eq", "session_id", session_id)],
+        order_col="timestamp_ms",
+    )
+    print(f"[process_trip] GPS rows fetched: {len(gps_rows)}")
+    if not gps_rows:
+        print("[process_trip] No GPS data, skipping.")
+        return
 
-    df["timesent"] = pd.to_datetime(df["timesent"], utc=True, errors="coerce")
-    #df["timesent"] = df["timesent"].dt.tz_convert("Asia/Kolkata")
-    df = df.sort_values("timesent").reset_index(drop=True)
+    # ── 3. Merge IMU + GPS ─────────────────────────────────────────────────────
+    imu_df = pd.DataFrame(imu_rows)
+    gps_df = pd.DataFrame(gps_rows)
 
-    # for enrich_events()
-    #df["time_ms"] = df["timesent"].astype("int64") // 10**6
-    base_time = df["timesent"].iloc[0]
-    df["time_ms"] = ((df["timesent"] - base_time).dt.total_seconds() * 1000).astype(int)
-    accelx = df["accelx"].iloc[0]
-    rotation_angle = 90 if accelx > 0 else -90
-    # running Aliv
-    #result = aliv_roadDefects(all_data)
-    result = aliv_roadDefects(df.to_dict(orient="records"))
+    # Parse created_at to UTC datetime – used both for Aliv's 'timestamp' and for
+    # mapping Aliv's output back to absolute time in enrich_events().
+    imu_df["created_at"] = pd.to_datetime(imu_df["created_at"], utc=True, errors="coerce")
+    fs = estimate_fs(imu_df, time_col="timestamp_ms")
+
+    df = merge_gps_into_imu(imu_df, gps_df)
+
+    # T0: the absolute UTC time of the first IMU row – anchor for Aliv's time axis.
+    timesent_T0 = pd.to_datetime(df["timestamp_ms"].iloc[0], unit="ms", utc=True)
+
+    # ── 4. Run Aliv ──────────────
+    aliv_input = build_aliv_input(df)
+    result = run_aliv(aliv_input, fs=fs)
+
     if not result.get("speedbreakers"):
-        print("No events detected")
+        print("[process_trip] No events detected.")
         return
-    
-    enriched_events = enrich_events(tripid, vehicleid, result, df, rotation_angle)
-    print("number of enriched events", enriched_events)
-    if enriched_events:
-        #supabase_target.table("roaddefects").insert(enriched_events).execute()
-        # Step 1: Insert and get IDs
-        insert_response = supabase_target.table("roaddefects")\
-            .insert(enriched_events)\
-            .execute()
+    aliv_trim_offset = 50 * (1000 / fs)
 
-        inserted_events = insert_response.data
+    # ── 5. Enrich events ───────────────────────────────────────────────────────
+    enriched_events = enrich_events(
+        session_id, vehicle_id, user_id, result, df, timesent_T0, aliv_trim_offset
+    )
+    print(f"[process_trip] Enriched events: {len(enriched_events)}")
+    if not enriched_events:
+        return
 
-        # ── NEW: update hexagons table ──────────────────────────
-        try:
-            update_hexagons(supabase_target, inserted_events)
-        except Exception as hexagons_err:
-            # Non-fatal: log and continue so images still process
-            print(f"[hexagons] update failed: {hexagons_err}")
+    enriched_events = [sanitize_for_json(e) for e in enriched_events]
 
-        # Step 2: Fetch and map images
-        images_to_insert = []
+    # ── 6. Insert road defects ─────────────────────────────────────────────────
+    # Strip vehicle_id and user_id from the DB insert — they live on the events
+    # in memory for hexagons logic but are not stored in imu_events.
+    events_for_db = [
+        {k: v for k, v in e.items() if k not in ("vehicle_id", "user_id")}
+        for e in enriched_events
+    ]
+    insert_response = supabase_target.table("imu_events").insert(events_for_db).execute()
+    inserted_events = insert_response.data
 
-        for event in inserted_events:
-            event_id = event["id"]
-            h3_index = event["h3_index"]
-            start_time = event["start_timestamp"]
-            end_time = event["end_timestamp"]
-            rotation_angle = event.get("rotation_angle", -90)  # fallback to -90
+    # Re-attach user_id and vehicle_id for the hexagons step.
+    for i, event in enumerate(inserted_events):
+        event["user_id"]    = enriched_events[i]["user_id"]
+        event["vehicle_id"] = enriched_events[i]["vehicle_id"]
 
-            adjusted_start_time = (
-                pd.to_datetime(start_time, utc=True) - timedelta(seconds=2.5)
-            ).isoformat()
+    # ── 7. Update hexagons ─────────────────────────────────────────────────────
+    try:
+        update_hexagons(supabase_target, inserted_events)
+    except Exception as hex_err:
+        print(f"[hexagons] update failed: {hex_err}")
 
-            image_response = (
-                supabase_source
-                .table("image_data")
-                .select("file_url, timestamp")
-                .eq("vehicle_id", vehicleid)
-                .gte("timestamp", adjusted_start_time)
-                .lte("timestamp", end_time)
-                .execute()
-            )
-
-            images = image_response.data
-            for img_row in images:
-                # Download image
-                try:
-                    resp = requests.get(img_row["file_url"], timeout=20)
-                    resp.raise_for_status()
-                    img_bytes = resp.content
-                except Exception as e:
-                    print(f"Failed to download image: {e}")
-                    continue
-
-                # Rotate + watermark
-                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                img = img.rotate(rotation_angle, expand=True)
-
-                original_dt = pd.to_datetime(img_row["timestamp"])
-                dt_str = original_dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                watermark_text = f"{dt_str}\ncaptured by vehnicate"
-
-                draw = ImageDraw.Draw(img)
-                font_size = int(img.height * 0.035)
-                while True:
-                    try:
-                        font = ImageFont.truetype("arial.ttf", font_size)
-                    except:
-                        font = ImageFont.load_default()
-                        break
-                    bbox = draw.multiline_textbbox((0, 0), watermark_text, font=font)
-                    if (bbox[2] - bbox[0]) <= img.width * 0.30:
-                        break
-                    font_size -= 2
-                    if font_size <= 12:
-                        break
-
-                padding = 20
-                for ox, oy in [(2,2),(-2,-2),(2,-2),(-2,2),(0,2),(2,0),(-2,0),(0,-2)]:
-                    draw.multiline_text((padding+ox, padding+oy), watermark_text, fill="black", font=font)
-                draw.multiline_text((padding, padding), watermark_text, fill="white", font=font)
-
-                # Upload to Supabase storage instead of saving locally
-                buffer = io.BytesIO()
-                img.save(buffer, format="JPEG")
-                buffer.seek(0)
-
-                file_name = f"{vehicleid}/{tripid}/{event_id}/{img_row['timestamp']}.jpg"
-                supabase_target.storage.from_("images").upload(
-                    file_name,
-                    buffer.read(),
-                    {"content-type": "image/jpeg"}
-                )
-                public_url = supabase_target.storage.from_("images").get_public_url(file_name)
-
-                images_to_insert.append({
-                    "vehicle_id": vehicleid,
-                    "trip_id": tripid,
-                    "h3_index": h3_index,
-                    "image_url": public_url,   # ← processed image URL, not original
-                    "event_id": event_id,
-                    "timestamp": img_row["timestamp"]
-                })
-
-        # Step 3: Insert images
-        if images_to_insert:
-            supabase_target.table("images").insert(images_to_insert).execute()
+    print("[process_trip] Finished.")
 
 
-    print("Processing finished")
-
+# ── Security middleware ────────────────────────────────────────────────────────
 
 @app.middleware("http")
 async def add_security_headers(request, call_next):
@@ -281,17 +353,18 @@ async def add_security_headers(request, call_next):
     response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
     return response
 
+
+# ── Webhook endpoint ───────────────────────────────────────────────────────────
+
 @app.post("/Aliv_for_MVP1")
-def Aliv_for_MVP1(payload: WebhookPayload,  background_tasks: BackgroundTasks):
-
-    trip = payload.record
-
+def Aliv_for_MVP1(payload: WebhookPayload, background_tasks: BackgroundTasks):
+    session = payload.record
     background_tasks.add_task(
         process_trip,
-        trip.tripid,
-        trip.vehicleid,
-        trip.starttime,
-        trip.endtime
+        session.session_id,
+        session.vehicle_id,
+        session.user_id,
+        session.start_time,
+        session.end_time,
     )
-
     return {"status": "received"}
