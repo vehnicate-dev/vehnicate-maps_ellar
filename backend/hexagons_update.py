@@ -109,18 +109,18 @@ def _credit_liquid_ellar(supabase_target: Client, user_id: str, amount: float) -
         return
     resp = (
         supabase_target
-        .table("userdetails")
+        .table("user_details")
         .select("liquid_ellar")
         .eq("firebaseuid", user_id)
         .execute()
     )
     if resp.data:
         new_balance = float(resp.data[0]["liquid_ellar"] or 0.0) + amount
-        supabase_target.table("userdetails").update(
+        supabase_target.table("user_details").update(
             {"liquid_ellar": new_balance}
         ).eq("firebaseuid", user_id).execute()
     else:
-        supabase_target.table("userdetails").insert(
+        supabase_target.table("user_details").insert(
             {"firebaseuid": user_id, "liquid_ellar": amount}
         ).execute()
 
@@ -136,18 +136,18 @@ def _credit_frozen_ellar(supabase_target: Client, user_id: str, amount: float) -
         return
     resp = (
         supabase_target
-        .table("userdetails")
+        .table("user_details")
         .select("frozen_ellar")
         .eq("firebaseuid", user_id)
         .execute()
     )
     if resp.data:
         new_balance = float(resp.data[0]["frozen_ellar"] or 0.0) + amount
-        supabase_target.table("userdetails").update(
+        supabase_target.table("user_details").update(
             {"frozen_ellar": new_balance}
         ).eq("firebaseuid", user_id).execute()
     else:
-        supabase_target.table("userdetails").insert(
+        supabase_target.table("user_details").insert(
             {"firebaseuid": user_id, "frozen_ellar": amount}
         ).execute()
 

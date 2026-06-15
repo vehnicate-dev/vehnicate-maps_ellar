@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from hexagons_update import update_hexagons
 from zoneinfo import ZoneInfo
 import math
-
+from distance import compute_total_distance
 
 IST = ZoneInfo("Asia/Kolkata")
 """
@@ -298,6 +298,41 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
     # T0: the absolute UTC time of the first IMU row – anchor for Aliv's time axis.
     timesent_T0 = pd.to_datetime(df["timestamp_ms"].iloc[0], unit="ms", utc=True)
 
+    # ── 3b. Compute total distance and update sessions table ───────────────────
+    total_distance_m = compute_total_distance(gps_df)
+    print(f"[process_trip] Total distance: {total_distance_m:.2f} m")
+
+    try:
+        supabase_source.table("sessions") \
+            .update({"distance": total_distance_m}) \
+            .eq("session_id", session_id) \
+            .execute()
+    except Exception as dist_err:
+        print(f"[process_trip] distance update failed: {dist_err}")
+    
+    # ── 3c. Increment cumulative distance in user_details ──────────────────────
+    try:
+        resp = (
+            supabase_target
+            .table("user_details")
+            .select("distance")
+            .eq("firebaseuid", user_id)
+            .execute()
+        )
+        if resp.data:
+            current_distance = float(resp.data[0]["distance"] or 0.0)
+            new_distance = current_distance + total_distance_m
+            supabase_target.table("user_details") \
+                .update({"distance": new_distance}) \
+                .eq("firebaseuid", user_id) \
+                .execute()
+        else:
+            supabase_target.table("user_details") \
+                .insert({"firebaseuid": user_id, "distance": total_distance_m}) \
+                .execute()
+    except Exception as user_dist_err:
+        print(f"[process_trip] user_details distance update failed: {user_dist_err}")
+        
     # ── 4. Run Aliv ──────────────
     aliv_input = build_aliv_input(df)
     result = run_aliv(aliv_input, fs=fs)
@@ -318,8 +353,8 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
     enriched_events = [sanitize_for_json(e) for e in enriched_events]
 
     # ── 6. Insert road defects ─────────────────────────────────────────────────
-    # Strip vehicle_id and user_id from the DB insert — they live on the events
-    # in memory for hexagons logic but are not stored in imu_events.
+    # user_id and vehicle_id are not columns on imu_events anymore —
+    # they're derivable via session_id. Strip them from the DB insert.
     events_for_db = [
         {k: v for k, v in e.items() if k not in ("vehicle_id", "user_id")}
         for e in enriched_events
@@ -327,8 +362,9 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
     insert_response = supabase_target.table("imu_events").insert(events_for_db).execute()
     inserted_events = insert_response.data
 
-    # Re-attach user_id and vehicle_id for the hexagons step.
+    # Re-attach id (renamed), user_id and vehicle_id for the hexagons step.
     for i, event in enumerate(inserted_events):
+        event["id"]         = event.pop("imu_events_id")
         event["user_id"]    = enriched_events[i]["user_id"]
         event["vehicle_id"] = enriched_events[i]["vehicle_id"]
 

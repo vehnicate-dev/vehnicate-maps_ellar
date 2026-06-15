@@ -3,21 +3,21 @@ from supabase import Client
 
 def _ledger_entry(
     supabase_target: Client,
-    receiver: str,
-    ellar: float,
+    receiver_id: str,
+    amount: float,
     ellar_type: str,
     comment: str,
-    sender: str | None = None,
+    sender_id: str | None = None,
 ) -> None:
-    """Insert one row into the ledger table. sender=None means system-issued."""
-    if ellar == 0.0:
+    """Insert one row into the ledger table. sender_id=None means system-issued."""
+    if amount == 0.0:
         return
     supabase_target.table("ledger").insert({
-        "sender": sender,
-        "receiver":   receiver,
-        "ellar":        round(ellar, 6),
-        "ellar_type": ellar_type,
-        "comment":      comment,
+        "sender_id":   sender_id,
+        "receiver_id": receiver_id,
+        "amount":      round(amount, 6),
+        "type":        ellar_type,
+        "comment":     comment,
     }).execute()
 
 
@@ -37,7 +37,7 @@ def ledger_discovery_frozen(
     """Discovery reward — frozen until legit check clears it."""
     comment = (
         f"Discovery reward (frozen) | hex={h3_index} | "
-        f"hexagons.id={hex_row_id} | n={n} | k={k}"
+        f"hexagons.roaddefect_id={hex_row_id} | n={n} | k={k}"
     )
     _ledger_entry(supabase_target, to_user_id, amount, "frozen", comment)
 
@@ -60,7 +60,7 @@ def ledger_discovery_liquid(
     """
     comment = (
         f"Discovery reward (liquid, post-legit) | hex={h3_index} | "
-        f"hexagons.id={hex_row_id} | n={n} | k={k} | nd={nd} | "
+        f"hexagons.roaddefect_id={hex_row_id} | n={n} | k={k} | nd={nd} | "
         f"I={I:.4f} | legit_rD/k={legit_rD}/{k}"
     )
     _ledger_entry(supabase_target, to_user_id, amount, "liquid", comment)
@@ -79,7 +79,7 @@ def ledger_late_legit_liquid(
     """Late-legitimacy top-up for a single rD that flipped from illegit → legit."""
     comment = (
         f"Late-legitimacy reward (liquid) | hex={h3_index} | "
-        f"hexagons.id={hex_row_id} | n={n} | k={k} | nd={nd}"
+        f"hexagons.roaddefect_id={hex_row_id} | n={n} | k={k} | nd={nd}"
     )
     _ledger_entry(supabase_target, to_user_id, amount, "liquid", comment)
 
@@ -95,6 +95,6 @@ def ledger_confirmation_liquid(
     """Confirmation reward — always immediately liquid."""
     comment = (
         f"Confirmation reward (liquid) | hex={h3_index} | "
-        f"hexagons.id={hex_row_id} | nd={nd}"
+        f"hexagons.roaddefect_id={hex_row_id} | nd={nd}"
     )
     _ledger_entry(supabase_target, to_user_id, amount, "liquid", comment)

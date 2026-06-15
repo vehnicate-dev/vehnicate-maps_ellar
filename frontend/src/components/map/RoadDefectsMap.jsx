@@ -76,8 +76,8 @@ async function fetchFramesForEvents(eventIds) {
 
   const { data: events, error: evErr } = await supabase
     .from("imu_events")
-    .select("id, session_id, start_time, end_time")
-    .in("id", eventIds);  // imu_events PK is "id", not "event_id"
+    .select("imu_events_id, session_id, start_time, end_time")
+    .in("imu_events_id", eventIds);  // imu_events PK is "id", not "event_id"
   if (evErr) { console.error("[supabase] imu_events:", evErr); return {}; }
 
   const map = {};
@@ -96,7 +96,7 @@ async function fetchFramesForEvents(eventIds) {
         .limit(8);
       if (frErr) { console.error("[supabase] frames:", frErr); return; }
 
-      map[ev.id] = (frames || []).map(f => ({
+      map[ev.imu_events_id] = (frames || []).map(f => ({
         url: f.image_path,
         timestamp_ms: f.timestamp_ms,
       }));
