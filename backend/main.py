@@ -304,7 +304,7 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
 
     try:
         supabase_source.table("sessions") \
-            .update({"distance": total_distance_m}) \
+            .update({"distance": total_distance_m/1000}) \
             .eq("session_id", session_id) \
             .execute()
     except Exception as dist_err:
@@ -321,14 +321,14 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
         )
         if resp.data:
             current_distance = float(resp.data[0]["distance"] or 0.0)
-            new_distance = current_distance + total_distance_m
+            new_distance = current_distance + (total_distance_m/1000)
             supabase_target.table("user_details") \
                 .update({"distance": new_distance}) \
                 .eq("firebaseuid", user_id) \
                 .execute()
         else:
             supabase_target.table("user_details") \
-                .insert({"firebaseuid": user_id, "distance": total_distance_m}) \
+                .insert({"firebaseuid": user_id, "distance": total_distance_m/1000}) \
                 .execute()
     except Exception as user_dist_err:
         print(f"[process_trip] user_details distance update failed: {user_dist_err}")
