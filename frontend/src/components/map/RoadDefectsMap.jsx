@@ -705,7 +705,7 @@ const styles = `
 
     /* ── Watermark — above legend, clear of filter bubble ── */
     #rdm-watermark {
-      font-size: 13px;
+      font-size: 16px;
       height: 32px;
       padding: 0 12px;
       border-radius: 12px;
@@ -1444,7 +1444,7 @@ export default function RoadDefectsMap() {
         {/* Only render last-detected when we have a real city */}
         {lastDetected && lastDetected.city && (
           <div id="rdm-last-detected">
-            last felt:  <b>{lastDetected.city}</b>
+            last felt: <b>{lastDetected.city}</b>
             {lastDetected.locality ? <>, {lastDetected.locality}</> : null}, {lastDetected.dateStr}
           </div>
         )}
