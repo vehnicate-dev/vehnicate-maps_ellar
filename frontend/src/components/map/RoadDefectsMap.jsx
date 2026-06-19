@@ -262,7 +262,7 @@ const styles = `
   @import url('https://fonts.googleapis.com/css2?family=Ledger&display=swap');
 
   #rdm-container {
-    position: absolute;
+    position: fixed;
     inset: 0;
     overflow: hidden;
   }
@@ -697,97 +697,141 @@ const styles = `
   /* ══════════════════════════════════════════════════
      MOBILE OVERRIDES  ≤ 640px
      Everything here is mobile-only. Desktop unchanged.
+
+     Layout (top → bottom):
+       1. Search bar — pinned to very top
+       2. Badge (vehnicate) + theme lever + refresh — one row, just below search
+       3. Map — fills all remaining space between that row and the footer
+       4. Footer (last-detected + legend) — pinned to bottom of viewport,
+          no page scrolling, nothing floats below the fold
      ══════════════════════════════════════════════════ */
   @media (max-width: 640px) {
+
+    /* Lock the viewport — no scrolling, footer truly pinned */
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+    }
+    #rdm-container {
+      position: fixed;
+      inset: 0;
+      height: 100dvh;
+      overflow: hidden;
+    }
 
     /* ── Hide Leaflet zoom buttons on mobile ── */
     .leaflet-control-zoom { display: none !important; }
 
-    /* ── Watermark — above legend, clear of filter bubble ── */
-    #rdm-watermark {
-      font-size: 13px;
-      height: 32px;
-      padding: 0 12px;
-      border-radius: 12px;
-      top: auto;
-      bottom: 10px;
-      left: 50%;
-      transform: translateX(-50%);
-    }
-
-    /* ════════════════════════════════════════════════
-       TOP BAR LAYOUT (mobile) — no badge
-       ┌────────────────────────────────────────────┐
-       │ [search_______________________] [↻]  [☽]  │
-       │ [last-detected________________]            │
-       └────────────────────────────────────────────┘
-       ════════════════════════════════════════════════ */
-
-    /* Controls row — top-right */
-    #rdm-controls-row {
-      top: 14px;
-      right: 12px;
-      gap: 8px;
-      align-items: center;
-    }
-
-    /* Refresh — icon-only compact square */
-    #rdm-refresh {
-      height: 40px;
-      width: 40px;
-      padding: 0;
-      border-radius: 14px;
-      justify-content: center;
-      font-size: 18px;
-    }
-
-    /* Theme toggle — slightly smaller */
-    #rdm-theme-toggle {
-      width: 28px;
-      height: 52px;
-      border-radius: 14px;
-    }
-    #rdm-theme-knob {
-      width: 20px;
-      height: 20px;
-      left: 4px;
-      right: 4px;
-      transform: translateY(24px);
-    }
-    .theme-light #rdm-theme-knob { transform: translateY(0); }
-
-    /* Search wrap — left edge to right of controls */
+    /* ── Search bar — very top of the screen ── */
     #rdm-search-wrap {
       position: absolute;
-      top: 14px;
+      top: 12px;
       left: 12px;
-      right: 92px;    /* controls area is ~80px wide + 12px right margin */
+      right: 12px;
       width: auto;
       transform: none;
+      z-index: 1001;
     }
-
     #rdm-search-box {
-      height: 40px;
+      height: 44px;
       border-radius: 14px;
       padding-left: 50px;
       padding-right: 12px;
     }
     #rdm-search-box::before { border-radius: 16px; }
     #rdm-search-box::after {
-      width: 38px;
-      height: 38px;
+      width: 36px;
+      height: 36px;
       left: 4px;
       border-radius: 10px;
     }
     #rdm-search-input { font-size: 13px; }
     #rdm-placeholder { left: 50px; font-size: 13px; }
+    #rdm-dropdown {
+      border-radius: 12px;
+      max-height: 50dvh;
+      overflow-y: auto;
+      z-index: 1001;
+    }
 
-    /* Dropdown stays below search */
-    #rdm-dropdown { border-radius: 12px; }
+    /* ── Row below search: badge (left) + lever & refresh (right) ── */
+    #rdm-watermark {
+      position: absolute;
+      top: 64px;              /* 12px search-top + 44px search-height + 8px gap */
+      left: 12px;
+      right: auto;
+      transform: none;
+      font-size: 13px;
+      height: 36px;
+      padding: 0 14px;
+      border-radius: 12px;
+      z-index: 999;
+    }
 
-    /* Last-detected — below search bar, same left edge */
+    #rdm-controls-row {
+      top: 64px;
+      right: 12px;
+      left: auto;
+      gap: 8px;
+      align-items: center;
+      z-index: 999;
+    }
+
+    /* Refresh — icon-only compact square */
+    #rdm-refresh {
+      height: 36px;
+      width: 36px;
+      padding: 0;
+      border-radius: 12px;
+      justify-content: center;
+      font-size: 16px;
+    }
+
+    /* Theme toggle — slightly smaller, matches the row height */
+    #rdm-theme-toggle {
+      width: 26px;
+      height: 36px;
+      border-radius: 12px;
+    }
+    #rdm-theme-knob {
+      width: 16px;
+      height: 16px;
+      left: 4px;
+      right: 4px;
+      transform: translateY(15px);
+    }
+    .theme-light #rdm-theme-knob { transform: translateY(0); }
+    #rdm-theme-track-icon-top,
+    #rdm-theme-track-icon-bottom {
+      width: 10px;
+      height: 10px;
+    }
+    #rdm-theme-track-icon-top { top: 4px; }
+    #rdm-theme-track-icon-bottom { bottom: 4px; }
+
+    /* ── Map fills the space between the badge row and the footer ──
+       Top offset = 64px row top + 36px row height + 8px gap = 108px
+       Bottom offset = reserved footer height, set below */
+    #rdm-map {
+      top: 108px;
+      bottom: 112px;
+      left: 0;
+      right: 0;
+      height: auto;
+    }
+
+    /* ════════════════════════════════════════════════
+       FOOTER — pinned to bottom of viewport.
+       Contains: last-detected (top line) + legend (bottom line),
+       confidence filter is folded into the same footer band.
+       ════════════════════════════════════════════════ */
+
+    /* Last-detected — top line of footer */
     #rdm-last-detected {
-      top: 62px;           /* 14 + 40 + 8 gap */
+      position: absolute;
+      top: auto;
+      bottom: 78px;
       left: 12px;
       right: 12px;
       height: auto;
@@ -799,71 +843,37 @@ const styles = `
       white-space: normal;
       text-align: left;
       display: block;
+      z-index: 999;
     }
 
-    /* ════════════════════════════════════════════════
-       CONFIDENCE FILTER — vertical slider, bottom-right
-       ════════════════════════════════════════════════ */
+    /* Confidence filter — bottom-right of footer band, compact pill */
     #rdm-filter-panel {
       top: auto;
+      bottom: 12px;
       right: 12px;
-      bottom: 24px;
+      left: auto;
       width: auto;
-      padding: 12px 10px 14px;
-      border-radius: 18px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 8px;
+      min-width: 130px;
+      padding: 8px 12px 10px;
+      border-radius: 14px;
+      z-index: 999;
     }
-
     #rdm-filter-title { display: none; }
+    #rdm-filter-value-row { margin-bottom: 4px; }
+    #rdm-filter-label { font-size: 10px; }
+    #rdm-filter-value { font-size: 12px; }
+    #rdm-filter-bounds { font-size: 9px; }
 
-    #rdm-filter-value-row {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 2px;
-      margin-bottom: 0;
-    }
-    #rdm-filter-label {
-      font-size: 9px;
-      color: rgba(255,255,255,0.5);
-      white-space: nowrap;
-    }
-    #rdm-filter-value { font-size: 14px; }
-
-    /* Vertical slider */
-    #rdm-filter-slider {
-      -webkit-appearance: slider-vertical;
-      appearance: none;
-      writing-mode: vertical-lr;
-      direction: rtl;
-      width: 4px;
-      height: 100px;
-      border-radius: 99px;
-      background: rgba(255,255,255,0.25);
-      cursor: pointer;
-      padding: 0;
-    }
-    #rdm-filter-slider::-webkit-slider-thumb { width: 18px; height: 18px; }
-    #rdm-filter-slider::-moz-range-thumb { width: 18px; height: 18px; }
-
-    #rdm-filter-bounds {
-      flex-direction: column-reverse;
-      align-items: center;
-      margin-top: 0;
-      font-size: 9.5px;
-      gap: 2px;
-    }
-
-    /* Legend stays bottom-left */
+    /* Legend — bottom-left of footer band */
     #rdm-legend {
-      bottom: 24px;
+      top: auto;
+      bottom: 12px;
       left: 12px;
-      padding: 10px 12px 8px;
+      padding: 8px 12px 8px;
+      border-radius: 14px;
+      z-index: 999;
     }
-    #rdm-legend-captions { font-size: 9.5px; }
+    #rdm-legend-captions { font-size: 9px; }
 
     /* Popup tweaks */
     .leaflet-popup { max-width: 92vw !important; }
@@ -967,7 +977,8 @@ function SearchBar({ onSelect }) {
   const [query,   setQuery]   = useState("");
   const [results, setResults] = useState([]);
   const [focused, setFocused] = useState(false);
-  const timerRef = useRef(null);
+  const timerRef  = useRef(null);
+  const inputRef  = useRef(null);
 
   const search = useCallback(async (q) => {
     if (q.length < 3) { setResults([]); return; }
@@ -999,6 +1010,18 @@ function SearchBar({ onSelect }) {
     setQuery(r.label.split(",")[0]);
     setResults([]);
     setFocused(false);
+    // Dismiss the mobile keyboard now that a result has been chosen
+    if (inputRef.current) inputRef.current.blur();
+  };
+
+  // Enter key triggers an immediate (non-debounced) search — mainly for
+  // mobile, where the on-screen keyboard's "search/go" key sends Enter
+  // but there's no separate submit button to tap.
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter") {
+      clearTimeout(timerRef.current);
+      search(query);
+    }
   };
 
   return (
@@ -1006,9 +1029,13 @@ function SearchBar({ onSelect }) {
       <div id="rdm-search-box">
         <input
           id="rdm-search-input"
+          ref={inputRef}
           type="text"
+          inputMode="search"
+          enterKeyHint="search"
           value={query}
           onChange={handleChange}
+          onKeyDown={handleKeyDown}
           onFocus={() => setFocused(true)}
           onBlur={() => setTimeout(() => { setFocused(false); }, 250)}
           autoComplete="off"
@@ -1226,7 +1253,18 @@ export default function RoadDefectsMap() {
 
     requestAnimationFrame(init);
 
+    // Re-measure the map whenever the viewport resizes (e.g. mobile browser
+    // chrome showing/hiding, orientation change) since #rdm-map now uses
+    // top/bottom offsets on mobile instead of a fixed inset.
+    const handleResize = () => {
+      if (mapRef.current) mapRef.current.invalidateSize();
+    };
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("orientationchange", handleResize);
+
     return () => {
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("orientationchange", handleResize);
       if (mapRef.current) {
         mapRef.current.remove();
         mapRef.current = null;
