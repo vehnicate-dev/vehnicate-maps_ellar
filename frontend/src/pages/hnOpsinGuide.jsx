@@ -685,7 +685,7 @@ export default function HNOpsinGuide() {
                 <div className="cover-book">
                   <div className="cover-eyebrow">vehnicate · vehnWay app</div>
                   <div className="cover-logo">
-                    <img src="/hn-logo.png" alt="vehnicate" style={{ width: 32, height: 32, objectFit: "contain" }} />
+                    <img src="/hn-logo_light.png" alt="vehnicate" style={{ width: 32, height: 32, objectFit: "contain" }} />
                   </div>
                   <h1 className="cover-title">User Manual to vehnicate's Mobile App</h1>
                   <p className="cover-subtitle">vehnWay: feel the roads!</p>
