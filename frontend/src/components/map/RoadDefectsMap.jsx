@@ -56,7 +56,7 @@ async function fetchEventsForCells(cells, cachedCells) {
     chunks.map(async (chunk) => {
       const { data, error } = await supabase
         .from("hexagons")
-        .select("h3_index, location, parameters, event_id")
+        .select("h3_index, location, parameters, event_id, confidence")
         .in("h3_index", chunk);
       if (error) { console.error("[supabase] roaddefects:", error); return []; }
       return data || [];
@@ -291,49 +291,44 @@ const styles = `
     will-change: clip-path;
   }
 
-  /* ── Watermark ── */
+  /* ── Watermark — sits above the leaflet attribution, left of the filter panel ── */
   #rdm-watermark {
-    position: absolute;
-    bottom: 40px;
-    right: 50px;
-    font-family: 'Ledger', serif;
-    font-size: 24px;
-    color: white;
-    letter-spacing: 1px;
-    pointer-events: none;
-    z-index: 1000;
-    transition: color 0.3s ease;
-  }
-  .theme-light #rdm-watermark { color: #1a1a22; }
-
-  /* ── Road Scout Badge ── */
-  #rdm-badge {
     position: absolute;
     top: 20px;
     left: 50%;
     transform: translateX(-50%);
-    padding: 10px 24px;
-    border-radius: 22px;
-    background: rgba(255, 255, 255, 0.18);
-    backdrop-filter: blur(16px);
-    border: 1px solid rgba(255, 255, 255, 0.28);
-    z-index: 1000;
+    font-family: 'Ledger', serif;
+    font-size: 22px;
+    letter-spacing: 1px;
     pointer-events: none;
+    z-index: 999;
     white-space: nowrap;
-    transition: background 0.3s ease, border-color 0.3s ease;
-  }
-  #rdm-badge span {
-    font-size: 16px;
-    font-weight: 600;
-    background: linear-gradient(135deg, #a855f7, #ec4899);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    border-radius: 20px;
+    
+    /* Dark theme: solid black bubble, white text */
+    background: rgba(0, 0, 0, 0.85);
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(16px);
+    
+    transition: background 0.3s ease, color 0.3s ease, border-color 0.3s ease;
   }
 
-  /* ── Last-detected badge ── */
+  /* Light theme: solid white bubble, dark text */
+  .theme-light #rdm-watermark {
+    background: rgba(255, 255, 255, 0.92);
+    color: #1a1a22;
+    border: 1px solid rgba(0, 0, 0, 0.10);
+  }
+
+  /* ── Last-detected badge — desktop: horizontally centred, vertically aligned with search ── */
   #rdm-last-detected {
     position: absolute;
-    top: 64px;
+    top: 76px;               /* 20px top + 48px watermark + 8px gap */
     left: 50%;
     transform: translateX(-50%);
     padding: 6px 18px;
@@ -348,6 +343,8 @@ const styles = `
     font-weight: 500;
     color: rgba(255, 255, 255, 0.85);
     letter-spacing: 0.2px;
+    display: flex;
+    align-items: center;
     transition: background 0.3s ease, border-color 0.3s ease, color 0.3s ease;
   }
   #rdm-last-detected b { color: #fff; font-weight: 700; }
@@ -569,24 +566,16 @@ const styles = `
     position: absolute;
     top: 90px;
     right: 20px;
-    width: 240px;
+    width: 220px;
     z-index: 999;
-    padding: 14px 16px 16px;
+    padding: 12px 16px 14px;
     border-radius: 18px;
     background: rgba(255, 255, 255, 0.18);
     backdrop-filter: blur(16px);
     border: 1px solid rgba(255, 255, 255, 0.28);
     transition: background 0.3s ease, border-color 0.3s ease;
   }
-  #rdm-filter-title {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.65);
-    margin-bottom: 10px;
-    transition: color 0.3s ease;
-  }
+  #rdm-filter-title { display: none; }
   #rdm-filter-value-row {
     display: flex;
     justify-content: space-between;
@@ -683,7 +672,6 @@ const styles = `
   /* ══════════════════════════════════════════════════
      LIGHT THEME OVERRIDES
      ══════════════════════════════════════════════════ */
-  .theme-light #rdm-badge { background: rgba(18,18,28,0.82); border: 1px solid rgba(0,0,0,0.18); }
   .theme-light #rdm-last-detected { background: rgba(18,18,28,0.76); border: 1px solid rgba(0,0,0,0.14); color: rgba(255,255,255,0.82); }
   .theme-light #rdm-last-detected b { color: #fff; }
   .theme-light #rdm-search-box { background: rgba(18,18,28,0.82); box-shadow: 0 8px 30px rgba(0,0,0,0.18); }
@@ -715,31 +703,26 @@ const styles = `
     /* ── Hide Leaflet zoom buttons on mobile ── */
     .leaflet-control-zoom { display: none !important; }
 
-    /* ── Watermark ── */
-    #rdm-watermark { font-size: 13px; bottom: 10px; right: 12px; }
+    /* ── Watermark — above legend, clear of filter bubble ── */
+    #rdm-watermark {
+      font-size: 13px;
+      bottom: 10px;
+      /* legend is left:12; filter panel is right:12 ~48px wide;
+         centre the watermark between them */
+      right: auto;
+      left: 50%;
+      transform: translateX(-50%);
+    }
 
     /* ════════════════════════════════════════════════
-       TOP BAR LAYOUT (mobile)
-       ┌──────────────────────────────────────────────┐
-       │ [badge]  [search__________________] [↻] [☽] │
-       │          [last-detected__________]           │
-       └──────────────────────────────────────────────┘
-       Badge is pinned top-left. Search stretches to fill
-       the space left of the controls. Controls sit top-right.
-       Last-detected anchors below the search bar.
+       TOP BAR LAYOUT (mobile) — no badge
+       ┌────────────────────────────────────────────┐
+       │ [search_______________________] [↻]  [☽]  │
+       │ [last-detected________________]            │
+       └────────────────────────────────────────────┘
        ════════════════════════════════════════════════ */
 
-    /* Badge — small pill, top-left */
-    #rdm-badge {
-      top: 14px;
-      left: 12px;
-      transform: none;
-      padding: 7px 14px;
-      border-radius: 16px;
-    }
-    #rdm-badge span { font-size: 13px; }
-
-    /* Controls row — top-right (refresh icon-only + toggle) */
+    /* Controls row — top-right */
     #rdm-controls-row {
       top: 14px;
       right: 12px;
@@ -754,10 +737,10 @@ const styles = `
       padding: 0;
       border-radius: 14px;
       justify-content: center;
-      font-size: 16px;
+      font-size: 18px;
     }
 
-    /* Theme toggle — same vertical pill, slightly smaller */
+    /* Theme toggle — slightly smaller */
     #rdm-theme-toggle {
       width: 28px;
       height: 52px;
@@ -772,14 +755,12 @@ const styles = `
     }
     .theme-light #rdm-theme-knob { transform: translateY(0); }
 
-    /* Search wrap — sits between badge and controls */
+    /* Search wrap — left edge to right of controls */
     #rdm-search-wrap {
-      /* Badge is ~14px left + ~90px wide → search starts at ~112px
-         Controls are ~12px right + ~76px wide → search ends at ~88px from right */
       position: absolute;
       top: 14px;
-      left: 112px;
-      right: 92px;
+      left: 12px;
+      right: 92px;    /* controls area is ~80px wide + 12px right margin */
       width: auto;
       transform: none;
     }
@@ -803,53 +784,40 @@ const styles = `
     /* Dropdown stays below search */
     #rdm-dropdown { border-radius: 12px; }
 
-    /* Last-detected — anchors BELOW the search bar */
+    /* Last-detected — below search bar, same left edge */
     #rdm-last-detected {
-      /* search top=14, height=40 → bottom at 54; +6 gap → 60 */
-      top: 62px;
-      left: 112px;
+      top: 62px;           /* 14 + 40 + 8 gap */
+      left: 12px;
       right: 12px;
+      height: auto;
+      line-height: 1.4;
       transform: none;
       padding: 5px 12px;
       border-radius: 12px;
       font-size: 10.5px;
       white-space: normal;
-      line-height: 1.4;
       text-align: left;
+      display: block;
     }
 
     /* ════════════════════════════════════════════════
-       DETECTIONS FILTER — vertical slider, bottom-right
-       Sits alongside the legend (which is bottom-left).
-       Panel is tall & narrow; slider is vertical.
+       CONFIDENCE FILTER — vertical slider, bottom-right
        ════════════════════════════════════════════════ */
     #rdm-filter-panel {
-      /* Reset desktop position */
       top: auto;
       right: 12px;
       bottom: 24px;
       width: auto;
       padding: 12px 10px 14px;
       border-radius: 18px;
-      /* Tall pill to house vertical slider */
       display: flex;
       flex-direction: column;
       align-items: center;
       gap: 8px;
     }
 
-    /* Title rotated to save horizontal space */
-    #rdm-filter-title {
-      writing-mode: vertical-rl;
-      text-orientation: mixed;
-      transform: rotate(180deg);
-      margin-bottom: 0;
-      font-size: 9.5px;
-      letter-spacing: 0.8px;
-      color: rgba(255,255,255,0.55);
-    }
+    #rdm-filter-title { display: none; }
 
-    /* Current value — shown vertically above the slider */
     #rdm-filter-value-row {
       display: flex;
       flex-direction: column;
@@ -869,7 +837,7 @@ const styles = `
       -webkit-appearance: slider-vertical;
       appearance: none;
       writing-mode: vertical-lr;
-      direction: rtl;       /* top = max, bottom = min — feels natural */
+      direction: rtl;
       width: 4px;
       height: 100px;
       border-radius: 99px;
@@ -877,32 +845,18 @@ const styles = `
       cursor: pointer;
       padding: 0;
     }
-    #rdm-filter-slider::-webkit-slider-thumb {
-      width: 18px;
-      height: 18px;
-    }
-    #rdm-filter-slider::-moz-range-thumb {
-      width: 18px;
-      height: 18px;
-    }
+    #rdm-filter-slider::-webkit-slider-thumb { width: 18px; height: 18px; }
+    #rdm-filter-slider::-moz-range-thumb { width: 18px; height: 18px; }
 
-    /* Min/max labels stacked */
     #rdm-filter-bounds {
-      flex-direction: column-reverse;  /* 1 at bottom, max at top */
+      flex-direction: column-reverse;
       align-items: center;
       margin-top: 0;
       font-size: 9.5px;
       gap: 2px;
     }
 
-    #rdm-filter-disabled-note {
-      writing-mode: vertical-rl;
-      transform: rotate(180deg);
-      font-size: 9px;
-      margin-top: 0;
-    }
-
-    /* Legend stays bottom-left, just tighten spacing */
+    /* Legend stays bottom-left */
     #rdm-legend {
       bottom: 24px;
       left: 12px;
@@ -1043,6 +997,7 @@ function SearchBar({ onSelect }) {
     onSelect(r.lat, r.lon, r.label.split(",")[0]);
     setQuery(r.label.split(",")[0]);
     setResults([]);
+    setFocused(false);
   };
 
   return (
@@ -1054,7 +1009,7 @@ function SearchBar({ onSelect }) {
           value={query}
           onChange={handleChange}
           onFocus={() => setFocused(true)}
-          onBlur={() => setTimeout(() => setFocused(false), 200)}
+          onBlur={() => setTimeout(() => { setFocused(false); }, 250)}
           autoComplete="off"
         />
         {!focused && !query && (
@@ -1074,7 +1029,12 @@ function SearchBar({ onSelect }) {
       {results.length > 0 && focused && (
         <div id="rdm-dropdown">
           {results.map((r, i) => (
-            <div key={i} className="rdm-result" onMouseDown={() => handlePick(r)}>
+            <div
+              key={i}
+              className="rdm-result"
+              onMouseDown={(e) => { e.preventDefault(); handlePick(r); }}
+              onTouchEnd={(e) => { e.preventDefault(); handlePick(r); }}
+            >
               {r.label}
             </div>
           ))}
@@ -1152,30 +1112,16 @@ export default function RoadDefectsMap() {
     }, 750);
   }, []);
 
-  // ── Detections filter ──────────────────────────────────────────────────────
-  const [minDetections, setMinDetections] = useState(1);
-  const [maxDetections, setMaxDetections] = useState(1);
+  // ── Confidence filter (0–100%) ─────────────────────────────────────────────
+  const [minConfidence, setMinConfidence] = useState(0);
 
   // ── Last detected badge ────────────────────────────────────────────────────
   const [lastDetected, setLastDetected] = useState(null);
   const lastDetectedKeyRef = useRef(null);
 
-  // ── Recompute slider max ───────────────────────────────────────────────────
-  const recomputeMaxAndApplyFilter = useCallback((minOverride) => {
-    const allRows = Object.values(eventCacheRef.current).flat();
-    const max = allRows.reduce((m, r) => Math.max(m, r.parameters.length), 1);
-    setMaxDetections(max);
-
-    const min = minOverride ?? minDetections;
-    setMinDetections(() => {
-      const next = minOverride ?? Math.min(min, max);
-      return next;
-    });
-
-    applyFilterToLayers(min > max ? max : min);
-  }, [minDetections]);
-
-  function applyFilterToLayers(min) {
+  // ── Apply confidence filter to all cached layers ───────────────────────────
+  // confidence is stored as 0–1 float in the hexagons row; threshold is 0–100 int.
+  const applyConfidenceFilter = useCallback((thresholdPct) => {
     const map = mapRef.current;
     if (!map) return;
     for (const [hexId, rows] of Object.entries(eventCacheRef.current)) {
@@ -1184,19 +1130,26 @@ export default function RoadDefectsMap() {
       rows.forEach((row, i) => {
         const marker = layers[i + 1];
         if (!marker) return;
-        const count = row.parameters.length;
-        const shouldShow = count >= min;
+        // confidence may be 0–1 float or 0–100; normalise to 0–100
+        const rawConf = row.confidence ?? 1;           // default show if missing
+        const confPct = rawConf <= 1 ? rawConf * 100 : rawConf;
+        const shouldShow = confPct >= thresholdPct;
         const has = map.hasLayer(marker);
         if (shouldShow && !has) marker.addTo(map);
         if (!shouldShow && has) map.removeLayer(marker);
       });
     }
-  }
+  }, []);
+
+  // Called after data loads — just re-apply current threshold
+  const recomputeMaxAndApplyFilter = useCallback(() => {
+    applyConfidenceFilter(minConfidence);
+  }, [minConfidence, applyConfidenceFilter]);
 
   const handleSliderChange = (e) => {
     const val = parseInt(e.target.value, 10);
-    setMinDetections(val);
-    applyFilterToLayers(val);
+    setMinConfidence(val);
+    applyConfidenceFilter(val);
   };
 
   // ── Last detected badge update ─────────────────────────────────────────────
@@ -1382,7 +1335,7 @@ export default function RoadDefectsMap() {
     }
 
     layerCacheRef.current[hexId] = layers;
-    applyFilterToLayers(minDetections);
+    applyConfidenceFilter(minConfidence);
   }
 
   // ── Search → fly to place ──────────────────────────────────────────────────
@@ -1461,11 +1414,10 @@ export default function RoadDefectsMap() {
           eventCacheRef.current[hexId] = events;
           drawHex(hexId, events);
         }
-        recomputeMaxAndApplyFilter(1);
+        recomputeMaxAndApplyFilter();
         maybeUpdateLastDetected(newEvents);
       } else {
-        setMaxDetections(1);
-        setMinDetections(1);
+        // nothing loaded — reset threshold display (slider stays at user's chosen value)
       }
     } catch (err) {
       console.error("[refresh]", err);
@@ -1488,12 +1440,10 @@ export default function RoadDefectsMap() {
 
         <SearchBar onSelect={handleSearchSelect} />
 
-        <div id="rdm-badge"><span>road-scout</span></div>
-
         {/* Only render last-detected when we have a real city */}
         {lastDetected && lastDetected.city && (
           <div id="rdm-last-detected">
-            last detected: <b>{lastDetected.city}</b>
+            last felt: <b>{lastDetected.city}</b>
             {lastDetected.locality ? <>, {lastDetected.locality}</> : null}, {lastDetected.dateStr}
           </div>
         )}
@@ -1515,35 +1465,28 @@ export default function RoadDefectsMap() {
             </div>
           </div>
           <button id="rdm-refresh" onClick={handleRefresh} disabled={refreshing}>
-            {refreshing
-              ? <><span className="spin">↻</span><span className="rdm-refresh-label"> Refreshing…</span></>
-              : <>↻</>}
+            <span className={refreshing ? "spin" : ""}>↻</span>
           </button>
         </div>
 
-        {/* Filter panel */}
+        {/* Confidence filter panel */}
         <div id="rdm-filter-panel">
-          <div id="rdm-filter-title">Filter by detections</div>
           <div id="rdm-filter-value-row">
-            <span id="rdm-filter-label">Detections ≥</span>
-            <span id="rdm-filter-value">{minDetections}</span>
+            <span id="rdm-filter-label">confidence ≥</span>
+            <span id="rdm-filter-value">{minConfidence}%</span>
           </div>
           <input
             id="rdm-filter-slider"
             type="range"
-            min={1}
-            max={Math.max(1, maxDetections)}
-            value={Math.min(minDetections, Math.max(1, maxDetections))}
+            min={0}
+            max={100}
+            value={minConfidence}
             onChange={handleSliderChange}
-            disabled={maxDetections <= 1}
           />
           <div id="rdm-filter-bounds">
-            <span>1</span>
-            <span>{Math.max(1, maxDetections)}</span>
+            <span>0%</span>
+            <span>100%</span>
           </div>
-          {maxDetections <= 1 && (
-            <div id="rdm-filter-disabled-note">No range in this view yet</div>
-          )}
         </div>
 
         {/* Legend */}
