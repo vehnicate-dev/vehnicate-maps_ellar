@@ -834,14 +834,14 @@ const styles = `
 
     /* Vertical slider */
     #rdm-filter-slider {
-      -webkit-appearance: slider-vertical;
+      -webkit-appearance: none;
       appearance: none;
-      writing-mode: vertical-rl;
+
       width: 4px;
       height: 100px;
-      border-radius: 99px;
-      cursor: pointer;
-      padding: 0;
+
+      writing-mode: vertical-lr;
+      transform: rotate(180deg);
     }
     #rdm-filter-slider::-webkit-slider-thumb { width: 18px; height: 18px; }
     #rdm-filter-slider::-moz-range-thumb { width: 18px; height: 18px; }
@@ -1150,13 +1150,30 @@ export default function RoadDefectsMap() {
   const updateSliderFill = useCallback((val) => {
     const el = sliderRef.current;
     if (!el) return;
-    const pct = val;
+
+    const pct = Number(val);
     const isMobile = window.innerWidth <= 640;
+
     if (isMobile) {
-      // vertical-rl: high values = thumb at top, so fill from bottom (100-pct) upward
-      el.style.background = `linear-gradient(to bottom, rgba(255,255,255,0.25) ${100 - pct}%, #a855f7 ${100 - pct}%)`;
+      el.style.background = `
+        linear-gradient(
+          to top,
+          #a855f7 0%,
+          #a855f7 ${pct}%,
+          rgba(255,255,255,0.25) ${pct}%,
+          rgba(255,255,255,0.25) 100%
+        )
+      `;
     } else {
-      el.style.background = `linear-gradient(to right, #a855f7 ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
+      el.style.background = `
+        linear-gradient(
+          to right,
+          #a855f7 0%,
+          #a855f7 ${pct}%,
+          rgba(255,255,255,0.25) ${pct}%,
+          rgba(255,255,255,0.25) 100%
+        )
+      `;
     }
   }, []);
 
@@ -1169,9 +1186,15 @@ export default function RoadDefectsMap() {
 
   // Set initial fill on mount and on resize
   useEffect(() => {
+    const handleResize = () => updateSliderFill(minConfidence);
+
     updateSliderFill(minConfidence);
-    window.addEventListener('resize', () => updateSliderFill(minConfidence));
-    return () => window.removeEventListener('resize', () => updateSliderFill(minConfidence));
+
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      window.removeEventListener("resize", handleResize);
+    };
   }, [minConfidence, updateSliderFill]);
 
   // ── Last detected badge update ─────────────────────────────────────────────
@@ -1507,8 +1530,8 @@ export default function RoadDefectsMap() {
             onChange={handleSliderChange}
           />
           <div id="rdm-filter-bounds">
-            <span>100%</span>
             <span>0%</span>
+            <span>100%</span>
           </div>
         </div>
 
