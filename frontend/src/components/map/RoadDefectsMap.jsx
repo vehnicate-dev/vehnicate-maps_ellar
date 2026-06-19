@@ -14,7 +14,7 @@ const H3_RES = 8;
 const CITIES = ["Chennai", "Surat", "Bangalore", "Mumbai", "Hyderabad", "Pune", "Kolkata"];
 const CITIES_LOOP = [...CITIES, CITIES[0]];
 
-// ─── Color ramp (for events only) ────────────────────────────────────────────
+// ─── Color ramp ───────────────────────────────────────────────────────────────
 function getEventColor(param) {
   param = Math.max(0, Math.min(1, param));
   if (param < 0.3) {
@@ -108,12 +108,15 @@ async function reverseGeocodeCityLocality(lat, lon) {
     );
     const data = await res.json();
     const a = data.address || {};
-    const city = a.city || a.town || a.village || a.county || a.state || data.display_name?.split(",")[0] || "Unknown";
-    const locality = a.suburb || a.neighbourhood || a.locality || a.road || a.residential || null;
+    const city =
+      a.city || a.town || a.village || a.county || a.state ||
+      data.display_name?.split(",")[0] || null;          // null instead of "Unknown"
+    const locality =
+      a.suburb || a.neighbourhood || a.locality || a.road || a.residential || null;
     return { city, locality };
   } catch (e) {
     console.error("[reverse-geocode]", e);
-    return { city: "Unknown", locality: null };
+    return { city: null, locality: null };
   }
 }
 
@@ -255,10 +258,6 @@ function buildHoverHTML(row, param) {
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
-// BUBBLE COLOR LOGIC:
-//   • Dark theme  → bubbles are WHITE / light-surface (opposite of the dark map)
-//   • Light theme → bubbles are DARK / near-black (opposite of the light map)
-// The .theme-light selector on #rdm-container drives the flip.
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=Ledger&display=swap');
 
@@ -275,7 +274,6 @@ const styles = `
     height: 100%;
   }
 
-  /* Light theme tile filter — transitions smoothly on the pane itself */
   #rdm-map .leaflet-tile-pane {
     transition: filter 0.75s ease;
   }
@@ -283,11 +281,6 @@ const styles = `
     filter: invert(1) hue-rotate(180deg) brightness(1.04) contrast(0.92) saturate(0.85);
   }
 
-  /* ── Iris transition layer ─────────────────────────────────────────────────
-     A clip-path circle that grows from the toggle button outward. It carries
-     only a very soft radial glow — not a solid colour — so the actual map
-     tiles show through as they cross-fade via their own filter transition.
-     The iris is a graceful eye-catcher, not a curtain. */
   #rdm-iris-layer {
     position: absolute;
     inset: 0;
@@ -311,13 +304,7 @@ const styles = `
     z-index: 1000;
     transition: color 0.3s ease;
   }
-  .theme-light #rdm-watermark {
-    color: #1a1a22;
-  }
-
-  /* ═══════════════════════════════════════════════════════════════
-     BUBBLE BASE — dark theme: white/frosted bubbles
-     ═══════════════════════════════════════════════════════════════ */
+  .theme-light #rdm-watermark { color: #1a1a22; }
 
   /* ── Road Scout Badge ── */
   #rdm-badge {
@@ -363,10 +350,7 @@ const styles = `
     letter-spacing: 0.2px;
     transition: background 0.3s ease, border-color 0.3s ease, color 0.3s ease;
   }
-  #rdm-last-detected b {
-    color: #fff;
-    font-weight: 700;
-  }
+  #rdm-last-detected b { color: #fff; font-weight: 700; }
 
   /* ── Search wrapper ── */
   #rdm-search-wrap {
@@ -391,8 +375,6 @@ const styles = `
     box-shadow: 0 8px 30px rgba(0,0,0,0.25);
     transition: background 0.3s ease;
   }
-
-  /* Gradient border */
   #rdm-search-box::before {
     content: "";
     position: absolute;
@@ -405,8 +387,6 @@ const styles = `
     pointer-events: none;
     z-index: 0;
   }
-
-  /* Logo — dark theme uses the dark-bg logo (white icon) */
   #rdm-search-box::after {
     content: "";
     position: absolute;
@@ -419,7 +399,6 @@ const styles = `
     z-index: 1;
     transition: background-image 0.3s ease;
   }
-
   #rdm-search-input {
     width: 100%;
     border: none;
@@ -432,7 +411,6 @@ const styles = `
     position: relative;
     z-index: 2;
   }
-
   #rdm-placeholder {
     position: absolute;
     left: 58px;
@@ -448,18 +426,12 @@ const styles = `
     z-index: 1;
     transition: color 0.3s ease;
   }
-
-  #rdm-city-rotator {
-    height: 20px;
-    overflow: hidden;
-  }
-
+  #rdm-city-rotator { height: 20px; overflow: hidden; }
   #rdm-city-inner {
     display: flex;
     flex-direction: column;
     animation: rdm-scroll 18.6s infinite;
   }
-
   @keyframes rdm-scroll {
     0%         { transform: translateY(0px); }
     13.4%      { transform: translateY(0px); }
@@ -476,12 +448,7 @@ const styles = `
     96.2%      { transform: translateY(0px); }
     100%       { transform: translateY(0px); }
   }
-
-  #rdm-city-inner span {
-    height: 20px;
-    line-height: 20px;
-    display: block;
-  }
+  #rdm-city-inner span { height: 20px; line-height: 20px; display: block; }
 
   /* Dropdown */
   #rdm-dropdown {
@@ -497,7 +464,6 @@ const styles = `
     border: 1px solid rgba(255, 255, 255, 0.12);
     transition: background 0.3s ease, border-color 0.3s ease;
   }
-
   .rdm-result {
     padding: 11px 18px;
     color: rgba(255, 255, 255, 0.85);
@@ -508,12 +474,9 @@ const styles = `
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .rdm-result:hover {
-    background: rgba(168, 85, 247, 0.18);
-    color: white;
-  }
+  .rdm-result:hover { background: rgba(168, 85, 247, 0.18); color: white; }
 
-  /* ── Top-right control row ── */
+  /* ── Top-right control row (desktop) ── */
   #rdm-controls-row {
     position: absolute;
     top: 20px;
@@ -539,10 +502,7 @@ const styles = `
     box-sizing: border-box;
     transition: border-color 0.3s ease, background 0.3s ease;
   }
-  #rdm-theme-toggle:hover {
-    border-color: rgba(168, 85, 247, 0.7);
-  }
-
+  #rdm-theme-toggle:hover { border-color: rgba(168, 85, 247, 0.7); }
   #rdm-theme-track-icon-top,
   #rdm-theme-track-icon-bottom {
     position: absolute;
@@ -557,7 +517,6 @@ const styles = `
   #rdm-theme-track-icon-bottom { bottom: 7px; opacity: 0.25; }
   .theme-light #rdm-theme-track-icon-top { opacity: 0.25; }
   .theme-light #rdm-theme-track-icon-bottom { opacity: 0.45; }
-
   #rdm-theme-knob {
     position: absolute;
     left: 4px;
@@ -579,12 +538,9 @@ const styles = `
     background: linear-gradient(135deg, #fff7d6, #ffe89e);
     border: 1px solid rgba(250, 204, 21, 0.5);
   }
-  #rdm-theme-knob svg {
-    width: 15px;
-    height: 15px;
-  }
+  #rdm-theme-knob svg { width: 15px; height: 15px; }
 
-  /* ── Refresh button — dark theme: white bubble ── */
+  /* ── Refresh button ── */
   #rdm-refresh {
     height: 42px;
     padding: 0 16px;
@@ -603,27 +559,14 @@ const styles = `
     white-space: nowrap;
     flex-shrink: 0;
   }
-  #rdm-refresh:hover {
-    background: rgba(255, 255, 255, 0.28);
-    border-color: rgba(168, 85, 247, 0.7);
-  }
-  #rdm-refresh:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  #rdm-refresh .spin {
-    display: inline-block;
-    animation: rdm-spin 0.8s linear infinite;
-  }
-  @keyframes rdm-spin {
-    from { transform: rotate(0deg); }
-    to   { transform: rotate(360deg); }
-  }
+  #rdm-refresh:hover { background: rgba(255, 255, 255, 0.28); border-color: rgba(168, 85, 247, 0.7); }
+  #rdm-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
+  #rdm-refresh .spin { display: inline-block; animation: rdm-spin 0.8s linear infinite; }
+  @keyframes rdm-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
-  /* ── Filter panel — dark theme: white bubble, dark text ── */
+  /* ── Filter panel (DESKTOP) ── */
   #rdm-filter-panel {
     position: absolute;
-    /* Moved down to 90px so it clears the theme toggle (58px tall + 20px top + gap) */
     top: 90px;
     right: 20px;
     width: 240px;
@@ -663,6 +606,7 @@ const styles = `
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
   }
+  /* Desktop slider — horizontal */
   #rdm-filter-slider {
     -webkit-appearance: none;
     appearance: none;
@@ -710,7 +654,7 @@ const styles = `
     transition: color 0.3s ease;
   }
 
-  /* ── Legend — dark theme: white bubble ── */
+  /* ── Legend ── */
   #rdm-legend {
     position: absolute;
     bottom: 24px;
@@ -723,13 +667,8 @@ const styles = `
     border: 1px solid rgba(255, 255, 255, 0.28);
     transition: background 0.3s ease, border-color 0.3s ease;
   }
-  #rdm-legend-track-row {
-    display: flex;
-    align-items: center;
-  }
-  #rdm-legend-track-row svg {
-    display: block;
-  }
+  #rdm-legend-track-row { display: flex; align-items: center; }
+  #rdm-legend-track-row svg { display: block; }
   #rdm-legend-captions {
     display: flex;
     justify-content: space-between;
@@ -741,174 +680,243 @@ const styles = `
     transition: color 0.3s ease;
   }
 
-  /* ═══════════════════════════════════════════════════════════════
-     LIGHT THEME OVERRIDES — flip to dark/opaque bubbles
-     ═══════════════════════════════════════════════════════════════ */
+  /* ══════════════════════════════════════════════════
+     LIGHT THEME OVERRIDES
+     ══════════════════════════════════════════════════ */
+  .theme-light #rdm-badge { background: rgba(18,18,28,0.82); border: 1px solid rgba(0,0,0,0.18); }
+  .theme-light #rdm-last-detected { background: rgba(18,18,28,0.76); border: 1px solid rgba(0,0,0,0.14); color: rgba(255,255,255,0.82); }
+  .theme-light #rdm-last-detected b { color: #fff; }
+  .theme-light #rdm-search-box { background: rgba(18,18,28,0.82); box-shadow: 0 8px 30px rgba(0,0,0,0.18); }
+  .theme-light #rdm-search-box::after { background-image: url('/hn-logo_light.png'); }
+  .theme-light #rdm-search-input { color: #fff; }
+  .theme-light #rdm-placeholder { color: rgba(255,255,255,0.45); }
+  .theme-light #rdm-dropdown { background: rgba(18,18,28,0.96); border: 1px solid rgba(255,255,255,0.1); }
+  .theme-light .rdm-result { color: rgba(255,255,255,0.85); }
+  .theme-light .rdm-result:hover { color: #fff; }
+  .theme-light #rdm-theme-toggle { background: rgba(18,18,28,0.82); border: 1px solid rgba(0,0,0,0.18); }
+  .theme-light #rdm-theme-toggle:hover { border-color: rgba(168,85,247,0.7); }
+  .theme-light #rdm-refresh { background: rgba(18,18,28,0.82); border: 1px solid rgba(0,0,0,0.18); color: #fff; }
+  .theme-light #rdm-refresh:hover { background: rgba(18,18,28,0.92); border-color: rgba(168,85,247,0.7); }
+  .theme-light #rdm-filter-panel { background: rgba(18,18,28,0.82); border: 1px solid rgba(0,0,0,0.18); }
+  .theme-light #rdm-filter-title { color: rgba(255,255,255,0.55); }
+  .theme-light #rdm-filter-label { color: rgba(255,255,255,0.88); }
+  .theme-light #rdm-filter-slider { background: rgba(255,255,255,0.2); }
+  .theme-light #rdm-filter-bounds { color: rgba(255,255,255,0.4); }
+  .theme-light #rdm-filter-disabled-note { color: rgba(255,255,255,0.45); }
+  .theme-light #rdm-legend { background: rgba(18,18,28,0.82); border: 1px solid rgba(0,0,0,0.18); }
+  .theme-light #rdm-legend-captions { color: rgba(255,255,255,0.75); }
 
-  /* Badge */
-  .theme-light #rdm-badge {
-    background: rgba(18, 18, 28, 0.82);
-    border: 1px solid rgba(0, 0, 0, 0.18);
-  }
-
-  /* Last detected */
-  .theme-light #rdm-last-detected {
-    background: rgba(18, 18, 28, 0.76);
-    border: 1px solid rgba(0, 0, 0, 0.14);
-    color: rgba(255, 255, 255, 0.82);
-  }
-  .theme-light #rdm-last-detected b {
-    color: #fff;
-  }
-
-  /* Search box */
-  .theme-light #rdm-search-box {
-    background: rgba(18, 18, 28, 0.82);
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
-  }
-  /* Switch to the light-bg logo (dark icon) */
-  .theme-light #rdm-search-box::after {
-    background-image: url('/hn-logo_light.png');
-  }
-  .theme-light #rdm-search-input {
-    color: #fff;
-  }
-  .theme-light #rdm-placeholder {
-    color: rgba(255, 255, 255, 0.45);
-  }
-
-  /* Dropdown */
-  .theme-light #rdm-dropdown {
-    background: rgba(18, 18, 28, 0.96);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-  }
-  .theme-light .rdm-result {
-    color: rgba(255, 255, 255, 0.85);
-  }
-  .theme-light .rdm-result:hover {
-    color: #fff;
-  }
-
-  /* Theme toggle */
-  .theme-light #rdm-theme-toggle {
-    background: rgba(18, 18, 28, 0.82);
-    border: 1px solid rgba(0, 0, 0, 0.18);
-  }
-  .theme-light #rdm-theme-toggle:hover {
-    border-color: rgba(168, 85, 247, 0.7);
-  }
-
-  /* Refresh */
-  .theme-light #rdm-refresh {
-    background: rgba(18, 18, 28, 0.82);
-    border: 1px solid rgba(0, 0, 0, 0.18);
-    color: #fff;
-  }
-  .theme-light #rdm-refresh:hover {
-    background: rgba(18, 18, 28, 0.92);
-    border-color: rgba(168, 85, 247, 0.7);
-  }
-
-  /* Filter panel */
-  .theme-light #rdm-filter-panel {
-    background: rgba(18, 18, 28, 0.82);
-    border: 1px solid rgba(0, 0, 0, 0.18);
-  }
-  .theme-light #rdm-filter-title {
-    color: rgba(255, 255, 255, 0.55);
-  }
-  .theme-light #rdm-filter-label {
-    color: rgba(255, 255, 255, 0.88);
-  }
-  .theme-light #rdm-filter-slider {
-    background: rgba(255, 255, 255, 0.2);
-  }
-  .theme-light #rdm-filter-bounds {
-    color: rgba(255, 255, 255, 0.4);
-  }
-  .theme-light #rdm-filter-disabled-note {
-    color: rgba(255, 255, 255, 0.45);
-  }
-
-  /* Legend */
-  .theme-light #rdm-legend {
-    background: rgba(18, 18, 28, 0.82);
-    border: 1px solid rgba(0, 0, 0, 0.18);
-  }
-  .theme-light #rdm-legend-captions {
-    color: rgba(255, 255, 255, 0.75);
-  }
-
-  /* ── Mobile overrides ── */
+  /* ══════════════════════════════════════════════════
+     MOBILE OVERRIDES  ≤ 640px
+     Everything here is mobile-only. Desktop unchanged.
+     ══════════════════════════════════════════════════ */
   @media (max-width: 640px) {
-    #rdm-search-wrap {
-      top: 110px;
-      left: 50%;
-      transform: translateX(-50%);
-      width: calc(100vw - 40px);
-      max-width: 340px;
-    }
-    #rdm-watermark {
-      font-size: 14px;
-      bottom: 12px;
-      right: 12px;
-    }
+
+    /* ── Hide Leaflet zoom buttons on mobile ── */
+    .leaflet-control-zoom { display: none !important; }
+
+    /* ── Watermark ── */
+    #rdm-watermark { font-size: 13px; bottom: 10px; right: 12px; }
+
+    /* ════════════════════════════════════════════════
+       TOP BAR LAYOUT (mobile)
+       ┌──────────────────────────────────────────────┐
+       │ [badge]  [search__________________] [↻] [☽] │
+       │          [last-detected__________]           │
+       └──────────────────────────────────────────────┘
+       Badge is pinned top-left. Search stretches to fill
+       the space left of the controls. Controls sit top-right.
+       Last-detected anchors below the search bar.
+       ════════════════════════════════════════════════ */
+
+    /* Badge — small pill, top-left */
     #rdm-badge {
-      padding: 8px 18px;
+      top: 14px;
+      left: 12px;
+      transform: none;
+      padding: 7px 14px;
+      border-radius: 16px;
     }
-    #rdm-badge span {
-      font-size: 14px;
-    }
-    #rdm-last-detected {
-      top: 58px;
-      font-size: 10.5px;
-      padding: 5px 14px;
-    }
-    #rdm-filter-panel {
-      top: 90px;
+    #rdm-badge span { font-size: 13px; }
+
+    /* Controls row — top-right (refresh icon-only + toggle) */
+    #rdm-controls-row {
+      top: 14px;
       right: 12px;
-      width: calc(100vw - 40px);
-      max-width: 280px;
+      gap: 8px;
+      align-items: center;
     }
+
+    /* Refresh — icon-only compact square */
+    #rdm-refresh {
+      height: 40px;
+      width: 40px;
+      padding: 0;
+      border-radius: 14px;
+      justify-content: center;
+      font-size: 16px;
+    }
+
+    /* Theme toggle — same vertical pill, slightly smaller */
     #rdm-theme-toggle {
       width: 28px;
-      height: 50px;
+      height: 52px;
+      border-radius: 14px;
     }
     #rdm-theme-knob {
       width: 20px;
       height: 20px;
-      transform: translateY(22px);
+      left: 4px;
+      right: 4px;
+      transform: translateY(24px);
     }
-    .theme-light #rdm-theme-knob {
-      transform: translateY(0);
+    .theme-light #rdm-theme-knob { transform: translateY(0); }
+
+    /* Search wrap — sits between badge and controls */
+    #rdm-search-wrap {
+      /* Badge is ~14px left + ~90px wide → search starts at ~112px
+         Controls are ~12px right + ~76px wide → search ends at ~88px from right */
+      position: absolute;
+      top: 14px;
+      left: 112px;
+      right: 92px;
+      width: auto;
+      transform: none;
     }
-    #rdm-controls-row {
-      top: 20px;
+
+    #rdm-search-box {
+      height: 40px;
+      border-radius: 14px;
+      padding-left: 50px;
+      padding-right: 12px;
+    }
+    #rdm-search-box::before { border-radius: 16px; }
+    #rdm-search-box::after {
+      width: 38px;
+      height: 38px;
+      left: 4px;
+      border-radius: 10px;
+    }
+    #rdm-search-input { font-size: 13px; }
+    #rdm-placeholder { left: 50px; font-size: 13px; }
+
+    /* Dropdown stays below search */
+    #rdm-dropdown { border-radius: 12px; }
+
+    /* Last-detected — anchors BELOW the search bar */
+    #rdm-last-detected {
+      /* search top=14, height=40 → bottom at 54; +6 gap → 60 */
+      top: 62px;
+      left: 112px;
       right: 12px;
+      transform: none;
+      padding: 5px 12px;
+      border-radius: 12px;
+      font-size: 10.5px;
+      white-space: normal;
+      line-height: 1.4;
+      text-align: left;
+    }
+
+    /* ════════════════════════════════════════════════
+       DETECTIONS FILTER — vertical slider, bottom-right
+       Sits alongside the legend (which is bottom-left).
+       Panel is tall & narrow; slider is vertical.
+       ════════════════════════════════════════════════ */
+    #rdm-filter-panel {
+      /* Reset desktop position */
+      top: auto;
+      right: 12px;
+      bottom: 24px;
+      width: auto;
+      padding: 12px 10px 14px;
+      border-radius: 18px;
+      /* Tall pill to house vertical slider */
+      display: flex;
+      flex-direction: column;
+      align-items: center;
       gap: 8px;
     }
-    #rdm-refresh {
-      height: 36px;
-      padding: 0 12px;
-      font-size: 12px;
+
+    /* Title rotated to save horizontal space */
+    #rdm-filter-title {
+      writing-mode: vertical-rl;
+      text-orientation: mixed;
+      transform: rotate(180deg);
+      margin-bottom: 0;
+      font-size: 9.5px;
+      letter-spacing: 0.8px;
+      color: rgba(255,255,255,0.55);
     }
+
+    /* Current value — shown vertically above the slider */
+    #rdm-filter-value-row {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      margin-bottom: 0;
+    }
+    #rdm-filter-label {
+      font-size: 9px;
+      color: rgba(255,255,255,0.5);
+      white-space: nowrap;
+    }
+    #rdm-filter-value { font-size: 14px; }
+
+    /* Vertical slider */
+    #rdm-filter-slider {
+      -webkit-appearance: slider-vertical;
+      appearance: none;
+      writing-mode: vertical-lr;
+      direction: rtl;       /* top = max, bottom = min — feels natural */
+      width: 4px;
+      height: 100px;
+      border-radius: 99px;
+      background: rgba(255,255,255,0.25);
+      cursor: pointer;
+      padding: 0;
+    }
+    #rdm-filter-slider::-webkit-slider-thumb {
+      width: 18px;
+      height: 18px;
+    }
+    #rdm-filter-slider::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+    }
+
+    /* Min/max labels stacked */
+    #rdm-filter-bounds {
+      flex-direction: column-reverse;  /* 1 at bottom, max at top */
+      align-items: center;
+      margin-top: 0;
+      font-size: 9.5px;
+      gap: 2px;
+    }
+
+    #rdm-filter-disabled-note {
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+      font-size: 9px;
+      margin-top: 0;
+    }
+
+    /* Legend stays bottom-left, just tighten spacing */
     #rdm-legend {
-      bottom: 16px;
+      bottom: 24px;
       left: 12px;
-      padding: 10px 14px 8px;
+      padding: 10px 12px 8px;
     }
-    .leaflet-popup {
-      max-width: 92vw !important;
-    }
-    .leaflet-popup-content-wrapper {
-      max-width: 92vw !important;
-    }
-    .leaflet-popup-content {
-      margin: 10px !important;
-    }
+    #rdm-legend-captions { font-size: 9.5px; }
+
+    /* Popup tweaks */
+    .leaflet-popup { max-width: 92vw !important; }
+    .leaflet-popup-content-wrapper { max-width: 92vw !important; }
+    .leaflet-popup-content { margin: 10px !important; }
   }
 
-  /* ── Leaflet popup / tooltip overrides (always dark) ── */
+  /* ── Leaflet popup / tooltip (always dark) ── */
   .leaflet-popup-content-wrapper {
     background: #12121a !important;
     border: 1px solid rgba(255,255,255,0.1) !important;
@@ -919,12 +927,7 @@ const styles = `
   }
   .leaflet-popup-content { margin: 14px !important; }
   .leaflet-popup-tip { background: #12121a !important; }
-  .leaflet-popup-close-button {
-    color: #aaa !important;
-    font-size: 18px !important;
-    top: 6px !important;
-    right: 8px !important;
-  }
+  .leaflet-popup-close-button { color: #aaa !important; font-size: 18px !important; top: 6px !important; right: 8px !important; }
   .leaflet-tooltip {
     background: rgba(10,10,18,0.97) !important;
     border: 1px solid rgba(255,255,255,0.15) !important;
@@ -933,28 +936,17 @@ const styles = `
     box-shadow: 0 4px 16px rgba(0,0,0,0.6) !important;
     padding: 8px 12px !important;
   }
-  .leaflet-tooltip-top:before {
-    border-top-color: rgba(255,255,255,0.15) !important;
-  }
+  .leaflet-tooltip-top:before { border-top-color: rgba(255,255,255,0.15) !important; }
   .leaflet-popup-content div::-webkit-scrollbar { height: 4px; }
   .leaflet-popup-content div::-webkit-scrollbar-track { background: transparent; }
-  .leaflet-popup-content div::-webkit-scrollbar-thumb {
-    background: #fff;
-    border-radius: 99px;
-  }
+  .leaflet-popup-content div::-webkit-scrollbar-thumb { background: #fff; border-radius: 99px; }
 
   /* ── Search-result pin pulse ── */
-  .rdm-search-pin-wrap {
-    position: relative;
-    width: 26px;
-    height: 26px;
-  }
+  .rdm-search-pin-wrap { position: relative; width: 26px; height: 26px; }
   .rdm-search-pin-pulse {
     position: absolute;
-    top: 3px;
-    left: 3px;
-    width: 20px;
-    height: 20px;
+    top: 3px; left: 3px;
+    width: 20px; height: 20px;
     border-radius: 50%;
     background: rgba(236,72,153,0.35);
     animation: rdm-pin-pulse 1.8s ease-out infinite;
@@ -991,12 +983,12 @@ function MoonIcon() {
 
 // ─── Bumpiness legend track ───────────────────────────────────────────────────
 function LegendTrack() {
-  const width   = 168;
-  const height  = 22;
-  const padX    = 11;
-  const usable  = width - padX * 2;
-  const dotsN   = 12;
-  const y       = height / 2;
+  const width  = 168;
+  const height = 22;
+  const padX   = 11;
+  const usable = width - padX * 2;
+  const dotsN  = 12;
+  const y      = height / 2;
 
   const dots = Array.from({ length: dotsN }, (_, i) => {
     const t = i / (dotsN - 1);
@@ -1006,10 +998,8 @@ function LegendTrack() {
 
   return (
     <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
-      <line
-        x1={padX} y1={y} x2={width - padX} y2={y}
-        stroke="rgba(255,255,255,0.18)" strokeWidth="3" strokeLinecap="round"
-      />
+      <line x1={padX} y1={y} x2={width - padX} y2={y}
+        stroke="rgba(255,255,255,0.18)" strokeWidth="3" strokeLinecap="round" />
       {dots.map((d, i) => (
         <circle key={i} cx={d.x} cy={y} r="3.4" fill={d.color} />
       ))}
@@ -1104,17 +1094,13 @@ export default function RoadDefectsMap() {
   const fetchedCells  = useRef(new Set());
   const isFetchingRef = useRef(false);
   const searchPinRef  = useRef(null);
-  const toggleBtnRef  = useRef(null);   // ref to the theme toggle button for iris origin
-  const irisLayerRef  = useRef(null);   // ref to the iris overlay div
+  const toggleBtnRef  = useRef(null);
+  const irisLayerRef  = useRef(null);
 
   // ── Theme ───────────────────────────────────────────────────────────────────
   const [theme, setTheme] = useState("dark");
 
   // ── Iris reveal transition ─────────────────────────────────────────────────
-  // Instead of covering the screen with a coloured circle, we build a real
-  // clone of the new theme's appearance, clip it to a circle of radius 0
-  // centred on the toggle button, then CSS-transition the clip to full screen.
-  // Once it lands, we swap the underlying theme and tear down the iris layer.
   const isAnimatingRef = useRef(false);
 
   const toggleTheme = useCallback(() => {
@@ -1131,14 +1117,12 @@ export default function RoadDefectsMap() {
     isAnimatingRef.current = true;
     const nextTheme = container.classList.contains("theme-light") ? "dark" : "light";
 
-    // 1. Immediately flip the real container class so tiles start cross-fading
     if (nextTheme === "light") {
       container.classList.add("theme-light");
     } else {
       container.classList.remove("theme-light");
     }
 
-    // 2. Play the iris glow over the top
     const cRect = container.getBoundingClientRect();
     const bRect = btn.getBoundingClientRect();
     const cx = ((bRect.left - cRect.left + bRect.width  / 2) / cRect.width  * 100).toFixed(2) + "%";
@@ -1147,7 +1131,6 @@ export default function RoadDefectsMap() {
     iris.style.setProperty("--iris-gx", cx);
     iris.style.setProperty("--iris-gy", cy);
 
-    // Set glow colour based on nextTheme (can't rely on React state here)
     const glowDiv = document.getElementById("rdm-iris-glow");
     if (glowDiv) {
       glowDiv.style.background = nextTheme === "light"
@@ -1161,7 +1144,6 @@ export default function RoadDefectsMap() {
     iris.style.transition = "clip-path 0.72s cubic-bezier(0.4, 0, 0.2, 1)";
     iris.style.clipPath = `circle(150% at ${cx} ${cy})`;
 
-    // 3. Collapse iris instantly before React re-renders, then sync state
     setTimeout(() => {
       iris.style.transition = "none";
       iris.style.clipPath = "circle(0% at 50% 50%)";
@@ -1185,8 +1167,8 @@ export default function RoadDefectsMap() {
     setMaxDetections(max);
 
     const min = minOverride ?? minDetections;
-    setMinDetections((prev) => {
-      const next = minOverride ?? Math.min(prev, max);
+    setMinDetections(() => {
+      const next = minOverride ?? Math.min(min, max);
       return next;
     });
 
@@ -1249,6 +1231,10 @@ export default function RoadDefectsMap() {
 
     const [lat, lon] = best.row.location;
     const { city, locality } = await reverseGeocodeCityLocality(lat, lon);
+
+    // Only render the badge if we got a valid city back
+    if (!city) return;
+
     const dateStr = formatISTDate(best.startTime);
     setLastDetected({ city, locality, dateStr });
   }, []);
@@ -1261,9 +1247,10 @@ export default function RoadDefectsMap() {
       const map = L.map(mapDivRef.current, {
         center: [13.05, 80.22],
         zoom: 13,
-        zoomControl: false,
+        zoomControl: false,   // We add it manually below — hidden on mobile via CSS
       });
 
+      // Add zoom control (CSS hides it on mobile)
       L.control.zoom({ position: "bottomright" }).addTo(map);
 
       L.tileLayer(
@@ -1305,8 +1292,6 @@ export default function RoadDefectsMap() {
 
       const newEvents = await fetchEventsForCells(toFetch, new Set());
       toFetch.forEach((c) => fetchedCells.current.add(c));
-
-      console.log("2. New events returned:", newEvents.length, newEvents);
 
       cells.forEach((c) => fetchedCells.current.add(c));
       if (!newEvents.length) return;
@@ -1496,24 +1481,24 @@ export default function RoadDefectsMap() {
       <div id="rdm-container" className={theme === "light" ? "theme-light" : ""}>
         <div id="rdm-map" ref={mapDivRef} />
 
-        {/* Iris reveal layer — soft radial glow that leads the tile-filter crossfade */}
+        {/* Iris reveal layer */}
         <div id="rdm-iris-layer" ref={irisLayerRef}>
-          <div id="rdm-iris-glow" style={{
-            position: "absolute", inset: 0,
-          }} />
+          <div id="rdm-iris-glow" style={{ position: "absolute", inset: 0 }} />
         </div>
 
         <SearchBar onSelect={handleSearchSelect} />
 
         <div id="rdm-badge"><span>road-scout</span></div>
 
-        {lastDetected && (
+        {/* Only render last-detected when we have a real city */}
+        {lastDetected && lastDetected.city && (
           <div id="rdm-last-detected">
             last detected: <b>{lastDetected.city}</b>
             {lastDetected.locality ? <>, {lastDetected.locality}</> : null}, {lastDetected.dateStr}
           </div>
         )}
 
+        {/* Controls: theme toggle + refresh (desktop: top-right row; mobile: same but icon-only refresh) */}
         <div id="rdm-controls-row">
           <div
             id="rdm-theme-toggle"
@@ -1531,11 +1516,12 @@ export default function RoadDefectsMap() {
           </div>
           <button id="rdm-refresh" onClick={handleRefresh} disabled={refreshing}>
             {refreshing
-              ? <><span className="spin">↻</span> Refreshing…</>
+              ? <><span className="spin">↻</span><span className="rdm-refresh-label"> Refreshing…</span></>
               : <>↻</>}
           </button>
         </div>
 
+        {/* Filter panel */}
         <div id="rdm-filter-panel">
           <div id="rdm-filter-title">Filter by detections</div>
           <div id="rdm-filter-value-row">
@@ -1560,6 +1546,7 @@ export default function RoadDefectsMap() {
           )}
         </div>
 
+        {/* Legend */}
         <div id="rdm-legend">
           <div id="rdm-legend-track-row">
             <LegendTrack />
