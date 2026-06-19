@@ -262,7 +262,7 @@ const styles = `
   @import url('https://fonts.googleapis.com/css2?family=Ledger&display=swap');
 
   #rdm-container {
-    position: fixed;
+    position: absolute;
     inset: 0;
     overflow: hidden;
   }
@@ -705,14 +705,14 @@ const styles = `
 
     /* ── Watermark — above legend, clear of filter bubble ── */
     #rdm-watermark {
-      top: 62px;        /* 14px top + 40px search bar + 8px gap */
+      font-size: 13px;
+      height: 32px;
+      padding: 0 12px;
+      border-radius: 12px;
+      top: 62px;        /* 14px (search top) + 40px (search height) + 8px gap */
       bottom: auto;
-      left: 12px;
-      transform: none;
-      font-size: 14px;
-      height: 38px;
-      padding: 0 14px;
-      border-radius: 14px;
+      left: 50%;
+      transform: translateX(-50%);
     }
 
     /* ════════════════════════════════════════════════
@@ -1444,7 +1444,7 @@ export default function RoadDefectsMap() {
         {/* Only render last-detected when we have a real city */}
         {lastDetected && lastDetected.city && (
           <div id="rdm-last-detected">
-            last felt: <b>{lastDetected.city}</b>
+            last felt:  <b>{lastDetected.city}</b>
             {lastDetected.locality ? <>, {lastDetected.locality}</> : null}, {lastDetected.dateStr}
           </div>
         )}
