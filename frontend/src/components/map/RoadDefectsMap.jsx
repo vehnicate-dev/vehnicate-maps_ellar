@@ -310,9 +310,9 @@ const styles = `
     border-radius: 20px;
     
     /* Dark theme: solid black bubble, white text */
-    background: rgba(0, 0, 0, 0.85);
-    color: white;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.92);
+    color: #1a1a22;
+    border: 1px solid rgba(0, 0, 0, 0.10);
     backdrop-filter: blur(16px);
     
     transition: background 0.3s ease, color 0.3s ease, border-color 0.3s ease;
@@ -320,9 +320,9 @@ const styles = `
 
   /* Light theme: solid white bubble, dark text */
   .theme-light #rdm-watermark {
-    background: rgba(255, 255, 255, 0.92);
-    color: #1a1a22;
-    border: 1px solid rgba(0, 0, 0, 0.10);
+    background: rgba(0, 0, 0, 0.85);
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.12);
   }
 
   /* ── Last-detected badge — desktop: horizontally centred, vertically aligned with search ── */
@@ -602,7 +602,6 @@ const styles = `
     width: 100%;
     height: 4px;
     border-radius: 99px;
-    background: rgba(255, 255, 255, 0.25);
     outline: none;
     cursor: pointer;
     transition: background 0.3s ease;
@@ -837,12 +836,10 @@ const styles = `
     #rdm-filter-slider {
       -webkit-appearance: slider-vertical;
       appearance: none;
-      writing-mode: vertical-lr;
-      direction: rtl;
+      writing-mode: vertical-rl;
       width: 4px;
       height: 100px;
       border-radius: 99px;
-      background: rgba(255,255,255,0.25);
       cursor: pointer;
       padding: 0;
     }
@@ -850,7 +847,7 @@ const styles = `
     #rdm-filter-slider::-moz-range-thumb { width: 18px; height: 18px; }
 
     #rdm-filter-bounds {
-      flex-direction: column-reverse;
+      flex-direction: column;
       align-items: center;
       margin-top: 0;
       font-size: 9.5px;
@@ -1147,11 +1144,35 @@ export default function RoadDefectsMap() {
     applyConfidenceFilter(minConfidence);
   }, [minConfidence, applyConfidenceFilter]);
 
+  
+  const sliderRef = useRef(null);
+
+  const updateSliderFill = useCallback((val) => {
+    const el = sliderRef.current;
+    if (!el) return;
+    const pct = val;
+    const isMobile = window.innerWidth <= 640;
+    if (isMobile) {
+      // vertical-rl: high values = thumb at top, so fill from bottom (100-pct) upward
+      el.style.background = `linear-gradient(to bottom, rgba(255,255,255,0.25) ${100 - pct}%, #a855f7 ${100 - pct}%)`;
+    } else {
+      el.style.background = `linear-gradient(to right, #a855f7 ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
+    }
+  }, []);
+
   const handleSliderChange = (e) => {
     const val = parseInt(e.target.value, 10);
     setMinConfidence(val);
     applyConfidenceFilter(val);
+    updateSliderFill(val);
   };
+
+  // Set initial fill on mount and on resize
+  useEffect(() => {
+    updateSliderFill(minConfidence);
+    window.addEventListener('resize', () => updateSliderFill(minConfidence));
+    return () => window.removeEventListener('resize', () => updateSliderFill(minConfidence));
+  }, [minConfidence, updateSliderFill]);
 
   // ── Last detected badge update ─────────────────────────────────────────────
   const maybeUpdateLastDetected = useCallback(async (rows) => {
@@ -1478,6 +1499,7 @@ export default function RoadDefectsMap() {
           </div>
           <input
             id="rdm-filter-slider"
+            ref={sliderRef}
             type="range"
             min={0}
             max={100}
@@ -1485,8 +1507,8 @@ export default function RoadDefectsMap() {
             onChange={handleSliderChange}
           />
           <div id="rdm-filter-bounds">
-            <span>0%</span>
             <span>100%</span>
+            <span>0%</span>
           </div>
         </div>
 
