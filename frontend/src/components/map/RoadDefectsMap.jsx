@@ -847,7 +847,7 @@ const styles = `
     #rdm-filter-slider::-moz-range-thumb { width: 18px; height: 18px; }
 
     #rdm-filter-bounds {
-      flex-direction: column;
+      flex-direction: column-reverse;
       align-items: center;
       margin-top: 0;
       font-size: 9.5px;
@@ -1150,30 +1150,13 @@ export default function RoadDefectsMap() {
   const updateSliderFill = useCallback((val) => {
     const el = sliderRef.current;
     if (!el) return;
-
     const pct = Number(val);
     const isMobile = window.innerWidth <= 640;
-
     if (isMobile) {
-      el.style.background = `
-        linear-gradient(
-          to top,
-          #a855f7 0%,
-          #a855f7 ${pct}%,
-          rgba(255,255,255,0.25) ${pct}%,
-          rgba(255,255,255,0.25) 100%
-        )
-      `;
+      // rotate(180deg) flips the element, so "to bottom" visually fills from bottom up
+      el.style.background = `linear-gradient(to bottom, #a855f7 ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
     } else {
-      el.style.background = `
-        linear-gradient(
-          to right,
-          #a855f7 0%,
-          #a855f7 ${pct}%,
-          rgba(255,255,255,0.25) ${pct}%,
-          rgba(255,255,255,0.25) 100%
-        )
-      `;
+      el.style.background = `linear-gradient(to right, #a855f7 ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
     }
   }, []);
 
