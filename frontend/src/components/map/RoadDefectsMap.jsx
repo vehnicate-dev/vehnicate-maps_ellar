@@ -706,10 +706,11 @@ const styles = `
     /* ── Watermark — above legend, clear of filter bubble ── */
     #rdm-watermark {
       font-size: 13px;
+      height: 32px;
+      padding: 0 12px;
+      border-radius: 12px;
+      top: auto;
       bottom: 10px;
-      /* legend is left:12; filter panel is right:12 ~48px wide;
-         centre the watermark between them */
-      right: auto;
       left: 50%;
       transform: translateX(-50%);
     }
