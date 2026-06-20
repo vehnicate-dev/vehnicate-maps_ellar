@@ -205,7 +205,7 @@ class AlivRoadDefects:
         df_resampled['time_ms'] = (df_resampled.index * (1000.0 / self.fs)).astype(int)
         df = df_resampled
 
-        filt_pitch = self.butter_bandpass(df['Pitch'].values, 0.56, 1.0) # 0.56, 1->0.8->0.7->0.6->0.66->0.65->1
+        filt_pitch = self.butter_bandpass(df['Pitch'].values, 0.46, 1.25) # 0.56->0.46, 1->0.8->0.7->0.6->0.66->0.65->1->1.5->1.25
         #print("filt_pitch length:", len(filt_pitch))
         #print("df length after resample:", len(df))
         if len(filt_pitch) < 100:
@@ -218,7 +218,7 @@ class AlivRoadDefects:
         df_f = pd.DataFrame({'Pitch': filt_pitch, 'gyro_y': gyro_y, 'time_ms': time_f})
 
         chunks = self.Chunking(df_f, 'Pitch', 'gyro_y')
-        s = np.std(filt_pitch) * 1.4 #(1.0->1.50->1.25->1.50->1.40)
+        s = np.std(filt_pitch) * 1.0 #(1.0->1.50->1.25->1.50->1.40->1.0)
         events, buf, active = [], [], False
 
         raw_time = df['time_ms'].values

@@ -17,7 +17,7 @@ const MapHeader = () => {
           className="flex items-center space-x-4 cursor-pointer"
         >
           <img
-            src="/hn-logo.png"
+            src="/hn-logo_light.png"
             alt="Vehnicate Logo"
             className="h-10"
           />

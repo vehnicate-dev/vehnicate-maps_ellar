@@ -174,8 +174,8 @@ def _check_trip_legitimacy(
           Mark legit=True in DB.
           FIX #8 — if it was previously judged illegit (legit was False),
           reward the discoverer immediately:
-            reward = [(10-5*log10(n)) + (99-n)/10] * sqrt(k) * (1/k)
-                   = [(10-5*log10(n)) + (99-n)/10] / sqrt(k)
+            reward = [(4-2*log10(n)) + (99-n)/10] * sqrt(k) * (1/k)
+                   = [(4-2*log10(n)) + (99-n)/10] / sqrt(k)
           credited as liquid_ellar in userdetails (reward has now cleared review).
       - illegit: increment counter.
 
@@ -234,7 +234,7 @@ def _check_trip_legitimacy(
                 # because the review has now passed (reward is no longer frozen).
                 if n <= 99:
                     late_reward = (
-                        (10 - 5 * math.log10(n)) + (99 - n) / 10
+                        (4 - 2 * math.log10(n)) + (99 - n) / 10
                     ) / math.sqrt(k_trip)
                 else:
                     late_reward = 1.0 / k_trip
@@ -264,7 +264,7 @@ def _check_trip_legitimacy(
     I = illegit_count / k_trip
 
     if n <= 99:
-        penalty = ((10 - 5 * math.log10(n)) + (99 - n) / 10) * math.sqrt(k_trip) * I
+        penalty = ((4 - 2 * math.log10(n)) + (99 - n) / 10) * math.sqrt(k_trip) * I
     else:
         discovery_earning = ellar_user_hex[trip_index] if trip_index < len(ellar_user_hex) else 0.0
         penalty = 1.01 * discovery_earning * I
@@ -498,7 +498,7 @@ def _process_hex_incremental(
                 if uid != og_discoverer:
                     nD = len(nd_array)
                     if nD <= 95:
-                        conf_reward = (1 - 0.5 * math.log10(nD))
+                        conf_reward = (0.4 - 0.2 * math.log10(nD))
                         ell_user += conf_reward
 
                         # ← NEW ledger entry per confirmation event
@@ -544,7 +544,7 @@ def _process_hex_incremental(
     rD = len(existing)
 
     if N <= 99:
-        og_reward = (10 - 5 * math.log10(N)) * math.sqrt(og)
+        og_reward = (4 - 2 * math.log10(N)) * math.sqrt(og)
     else:
         value_rD  = ell_hex / rD if rD > 0 else 0.0
         og_reward = value_rD * og
