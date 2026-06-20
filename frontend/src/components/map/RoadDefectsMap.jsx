@@ -103,26 +103,16 @@ async function fetchFramesForEvents(eventIds) {
 async function fetchGlobalLastDetected() {
   const { data, error } = await supabase
     .from("imu_events")
-    .select("imu_events_id, start_time")
+    .select("imu_events_id, start_time, path")
     .order("start_time", { ascending: false })
     .limit(1);
   if (error) { console.error("[supabase] global last-detected:", error); return null; }
   if (!data || !data.length) return null;
 
   const latestEvent = data[0];
+  if (!latestEvent.path || !latestEvent.path.length) return null;
 
-  // Now find the matching hexagons row to get lat/lon for this event
-  const { data: hexRows, error: hexErr } = await supabase
-    .from("hexagons")
-    .select("location, event_id")
-    .contains("event_id", [latestEvent.imu_events_id])
-    .limit(1);
-  if (hexErr || !hexRows || !hexRows.length) {
-    console.error("[supabase] hex lookup for global last-detected:", hexErr);
-    return null;
-  }
-
-  const [lat, lon] = hexRows[0].location;
+  const [lat, lon] = latestEvent.path[latestEvent.path.length - 1];
   return { eid: latestEvent.imu_events_id, startTime: latestEvent.start_time, lat, lon };
 }
 
@@ -1444,7 +1434,7 @@ export default function RoadDefectsMap() {
 
     setRefreshing(false);
   }, [refreshing, recomputeMaxAndApplyFilter, loadGlobalLastDetected]);
-  
+
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <>
