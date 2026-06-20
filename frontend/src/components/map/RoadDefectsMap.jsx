@@ -801,58 +801,55 @@ const styles = `
     }
 
     /* ════════════════════════════════════════════════
-       CONFIDENCE FILTER — vertical slider, bottom-right
+       CONFIDENCE FILTER — horizontal slider, bottom-right
+       sits adjacent to legend, same row, above leaflet attribution
        ════════════════════════════════════════════════ */
     #rdm-filter-panel {
       top: auto;
-      right: 12px;
       bottom: 24px;
-      width: auto;
-      padding: 12px 10px 14px;
-      border-radius: 18px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 8px;
+      right: 12px;
+      left: auto;
+      width: 150px;
+      padding: 10px 14px 10px;
+      border-radius: 16px;
     }
 
     #rdm-filter-title { display: none; }
 
     #rdm-filter-value-row {
       display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 2px;
-      margin-bottom: 0;
+      flex-direction: row;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 0;
+      margin-bottom: 6px;
     }
     #rdm-filter-label {
-      font-size: 9px;
-      color: rgba(255,255,255,0.5);
+      font-size: 10px;
+      color: rgba(255,255,255,0.6);
       white-space: nowrap;
     }
-    #rdm-filter-value { font-size: 14px; }
+    #rdm-filter-value { font-size: 12px; }
 
-    /* Vertical slider */
+    /* Horizontal slider — same as desktop */
     #rdm-filter-slider {
       -webkit-appearance: none;
       appearance: none;
-
-      width: 4px;
-      height: 100px;
-
-      writing-mode: vertical-rl;
-      direction: rtl;
-      transform: none;
+      width: 100%;
+      height: 4px;
+      writing-mode: horizontal-tb;
+      direction: ltr;
     }
-    #rdm-filter-slider::-webkit-slider-thumb { width: 18px; height: 18px; }
-    #rdm-filter-slider::-moz-range-thumb { width: 18px; height: 18px; }
+    #rdm-filter-slider::-webkit-slider-thumb { width: 14px; height: 14px; }
+    #rdm-filter-slider::-moz-range-thumb { width: 14px; height: 14px; }
 
     #rdm-filter-bounds {
-      flex-direction: column-reverse;
+      flex-direction: row;
+      justify-content: space-between;
       align-items: center;
-      margin-top: 0;
-      font-size: 9.5px;
-      gap: 2px;
+      margin-top: 4px;
+      font-size: 9px;
+      gap: 0;
     }
 
     /* Legend stays bottom-left */
@@ -1152,13 +1149,7 @@ export default function RoadDefectsMap() {
     const el = sliderRef.current;
     if (!el) return;
     const pct = Number(val);
-    const isMobile = window.innerWidth <= 640;
-    if (isMobile) {
-      el.style.background = `linear-gradient(to bottom, #a855f7 ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
-    }
-    else {
-      el.style.background = `linear-gradient(to right, #a855f7 ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
-    }
+    el.style.background = `linear-gradient(to right, #a855f7 ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
   }, []);
 
   const handleSliderChange = (e) => {
