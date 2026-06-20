@@ -840,8 +840,9 @@ const styles = `
       width: 4px;
       height: 100px;
 
-      writing-mode: vertical-lr;
-      transform: rotate(180deg);
+      writing-mode: vertical-rl;
+      direction: rtl;
+      transform: none;
     }
     #rdm-filter-slider::-webkit-slider-thumb { width: 18px; height: 18px; }
     #rdm-filter-slider::-moz-range-thumb { width: 18px; height: 18px; }
@@ -1153,9 +1154,9 @@ export default function RoadDefectsMap() {
     const pct = Number(val);
     const isMobile = window.innerWidth <= 640;
     if (isMobile) {
-      // rotate(180deg) flips the element, so "to bottom" visually fills from bottom up
       el.style.background = `linear-gradient(to bottom, #a855f7 ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
-    } else {
+    }
+    else {
       el.style.background = `linear-gradient(to right, #a855f7 ${pct}%, rgba(255,255,255,0.25) ${pct}%)`;
     }
   }, []);

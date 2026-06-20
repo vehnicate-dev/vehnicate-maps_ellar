@@ -218,7 +218,7 @@ class AlivRoadDefects:
         df_f = pd.DataFrame({'Pitch': filt_pitch, 'gyro_y': gyro_y, 'time_ms': time_f})
 
         chunks = self.Chunking(df_f, 'Pitch', 'gyro_y')
-        s = np.std(filt_pitch) * 1.40 #(1.0->1.50->1.25->1.50->1.40)
+        s = np.std(filt_pitch) * 1.4 #(1.0->1.50->1.25->1.50->1.40)
         events, buf, active = [], [], False
 
         raw_time = df['time_ms'].values
