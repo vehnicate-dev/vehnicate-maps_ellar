@@ -786,7 +786,7 @@ const styles = `
 
     /* Last-detected — below search bar, same left edge */
     #rdm-last-detected {
-      top: 62px;           /* 14 + 40 + 8 gap */
+      top: 102px;           /* 62px (watermark top) + 32px (watermark height) + 8px gap */
       left: 12px;
       right: 12px;
       height: auto;
