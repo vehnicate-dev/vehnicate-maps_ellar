@@ -7,13 +7,20 @@ const MapPage = () => {
   return (
     <div
       className="flex flex-col bg-black overflow-hidden"
-      style={{ height: "100dvh" }}  /* dvh accounts for mobile browser address bar */
+      style={{
+        height: "100dvh",       /* dvh accounts for mobile browser address bar */
+        overscrollBehavior: "none",
+        touchAction: "none",
+      }}
     >
 
       {/* Map */}
       <div
         className="relative"
-        style={{ height: `calc(100dvh - ${FOOTER_HEIGHT}px)` }}
+        style={{
+          height: `calc(100dvh - ${FOOTER_HEIGHT}px)`,
+          overscrollBehavior: "none",
+        }}
       >
         <RoadDefectsMap />
       </div>
@@ -21,7 +28,12 @@ const MapPage = () => {
       {/* Footer */}
       <footer
         className="bg-black border-t border-purple-500/20 flex items-center justify-center text-center px-4"
-        style={{ height: `${FOOTER_HEIGHT}px`, flexShrink: 0 }}
+        style={{
+          height: `${FOOTER_HEIGHT}px`,
+          flexShrink: 0,
+          overscrollBehavior: "none",
+          touchAction: "none",
+        }}
       >
         <p className="text-gray-400 text-sm md:text-base">
           Don't find your place?{" "}
