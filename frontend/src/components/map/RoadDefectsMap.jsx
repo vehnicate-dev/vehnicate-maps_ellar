@@ -100,6 +100,32 @@ async function fetchFramesForEvents(eventIds) {
   return map;
 }
 
+async function fetchGlobalLastDetected() {
+  const { data, error } = await supabase
+    .from("imu_events")
+    .select("imu_events_id, start_time")
+    .order("start_time", { ascending: false })
+    .limit(1);
+  if (error) { console.error("[supabase] global last-detected:", error); return null; }
+  if (!data || !data.length) return null;
+
+  const latestEvent = data[0];
+
+  // Now find the matching hexagons row to get lat/lon for this event
+  const { data: hexRows, error: hexErr } = await supabase
+    .from("hexagons")
+    .select("location, event_id")
+    .contains("event_id", [latestEvent.imu_events_id])
+    .limit(1);
+  if (hexErr || !hexRows || !hexRows.length) {
+    console.error("[supabase] hex lookup for global last-detected:", hexErr);
+    return null;
+  }
+
+  const [lat, lon] = hexRows[0].location;
+  return { eid: latestEvent.imu_events_id, startTime: latestEvent.start_time, lat, lon };
+}
+
 async function reverseGeocodeCityLocality(lat, lon) {
   try {
     const res = await fetch(
@@ -1172,43 +1198,17 @@ export default function RoadDefectsMap() {
     };
   }, [minConfidence, updateSliderFill]);
 
-  // ── Last detected badge update ─────────────────────────────────────────────
-  const maybeUpdateLastDetected = useCallback(async (rows) => {
-    if (!rows.length) return;
+  const loadGlobalLastDetected = useCallback(async () => {
+    const result = await fetchGlobalLastDetected();
+    if (!result) return;
 
-    const candidateEids = [...new Set(rows.map((r) => r.event_id[r.event_id.length - 1]))];
+    if (lastDetectedKeyRef.current === result.eid) return;
+    lastDetectedKeyRef.current = result.eid;
 
-    const { data: events, error } = await supabase
-      .from("imu_events")
-      .select("imu_events_id, start_time")
-      .in("imu_events_id", candidateEids);
-    if (error) { console.error("[supabase] imu_events (last-detected):", error); return; }
-    if (!events || !events.length) return;
-
-    const startTimeByEid = {};
-    for (const ev of events) startTimeByEid[ev.imu_events_id] = ev.start_time;
-
-    let best = null;
-    let bestTime = -Infinity;
-    for (const row of rows) {
-      const eid = row.event_id[row.event_id.length - 1];
-      const st = startTimeByEid[eid];
-      if (!st) continue;
-      const ms = new Date(st).getTime();
-      if (ms > bestTime) { bestTime = ms; best = { row, eid, startTime: st }; }
-    }
-    if (!best) return;
-
-    if (lastDetectedKeyRef.current === best.eid) return;
-    lastDetectedKeyRef.current = best.eid;
-
-    const [lat, lon] = best.row.location;
-    const { city, locality } = await reverseGeocodeCityLocality(lat, lon);
-
-    // Only render the badge if we got a valid city back
+    const { city, locality } = await reverseGeocodeCityLocality(result.lat, result.lon);
     if (!city) return;
 
-    const dateStr = formatISTDate(best.startTime);
+    const dateStr = formatISTDate(result.startTime);
     setLastDetected({ city, locality, dateStr });
   }, []);
 
@@ -1235,7 +1235,7 @@ export default function RoadDefectsMap() {
       setTimeout(() => map.invalidateSize(), 100);
 
       loadViewport();
-
+      loadGlobalLastDetected();
       let moveTimer = null;
       map.on("moveend", () => {
         clearTimeout(moveTimer);
@@ -1286,13 +1286,12 @@ export default function RoadDefectsMap() {
       }
 
       recomputeMaxAndApplyFilter();
-      maybeUpdateLastDetected(newEvents);
     } catch (err) {
       console.error("[loadViewport]", err);
     } finally {
       isFetchingRef.current = false;
     }
-  }, [recomputeMaxAndApplyFilter, maybeUpdateLastDetected]);
+  }, [recomputeMaxAndApplyFilter]);
 
   // ── Draw hex ───────────────────────────────────────────────────────────────
   function drawHex(hexId, rows) {
@@ -1435,7 +1434,7 @@ export default function RoadDefectsMap() {
           drawHex(hexId, events);
         }
         recomputeMaxAndApplyFilter();
-        maybeUpdateLastDetected(newEvents);
+        loadGlobalLastDetected();
       } else {
         // nothing loaded — reset threshold display (slider stays at user's chosen value)
       }
@@ -1444,8 +1443,8 @@ export default function RoadDefectsMap() {
     }
 
     setRefreshing(false);
-  }, [refreshing, recomputeMaxAndApplyFilter, maybeUpdateLastDetected]);
-
+  }, [refreshing, recomputeMaxAndApplyFilter, loadGlobalLastDetected]);
+  
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <>
