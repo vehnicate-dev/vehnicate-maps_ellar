@@ -223,7 +223,7 @@ def enrich_events(
             continue
 
         first_lat, first_lon = lat_lon[0][0], lat_lon[0][1]
-        h3_index = h3lib.latlng_to_cell(first_lat, first_lon, 8)
+        h3_index = h3lib.latlng_to_cell(first_lat, first_lon, 9)
 
         enriched.append({
             "user_id":    user_id,

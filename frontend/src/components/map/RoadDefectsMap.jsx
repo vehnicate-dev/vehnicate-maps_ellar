@@ -146,7 +146,7 @@ function formatISTDate(utcDateInput) {
          `${pad(ist.getUTCHours())}:${pad(ist.getUTCMinutes())} IST`;
 }
 
-function applyWatermark(url, timestamp_ms, rotation = 90) {
+function applyWatermark(url, timestamp_ms, rotation = 0) {
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = "anonymous";

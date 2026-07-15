@@ -205,7 +205,7 @@ class AlivRoadDefects:
         df_resampled['time_ms'] = (df_resampled.index * (1000.0 / self.fs)).astype(int)
         df = df_resampled
 
-        filt_pitch = self.butter_bandpass(df['Pitch'].values, 0.46, 1.25) # 0.56->0.46, 1->0.8->0.7->0.6->0.66->0.65->1->1.5->1.25
+        filt_pitch = self.butter_bandpass(df['Pitch'].values, 0.46, 1.5) # 0.56->0.46, 1->0.8->0.7->0.6->0.66->0.65->1->1.5->1.25
         #print("filt_pitch length:", len(filt_pitch))
         #print("df length after resample:", len(df))
         if len(filt_pitch) < 100:
