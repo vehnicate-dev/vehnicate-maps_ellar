@@ -6,6 +6,7 @@ import MapPage from "./pages/MapPage";
 import HnOpsinGuide from "./pages/hnOpsinGuide";
 import "./styles/globals.css";
 import { Analytics } from "@vercel/analytics/react";
+import { Analytics } from "@vercel/analytics/next"
 
 function AnimatedRoutes() {
   const location = useLocation();
