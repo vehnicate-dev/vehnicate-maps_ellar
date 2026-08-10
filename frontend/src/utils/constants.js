@@ -21,7 +21,6 @@ export const NAVIGATION = [
   { name: 'Home', href: '#home' },
   { name: 'About', href: '#about' },
   { name: 'How It Works', href: '#working' },
-  { name: 'Team', href: '#team' },
   { name: 'Community', href: '#community' },
   { name: 'Contact', href: '#contact' }
 ]

@@ -204,9 +204,8 @@ const Contact = () => {
                     Business Hours
                   </h4>
                   <div className="text-gray-400 group-hover:text-gray-200 transition-colors duration-300 space-y-1 text-sm sm:text-base">
-                    <p>Monday - Friday: 9:00 AM - 6:00 PM</p>
-                    <p>Saturday: 10:00 AM - 4:00 PM</p>
-                    <p>Sunday: Closed</p>
+                    <p>uhm... we dont think the boundaries are well defined</p>
+                    <p>mail/message us at anytime</p>
                   </div>
                 </div>
               </Card>

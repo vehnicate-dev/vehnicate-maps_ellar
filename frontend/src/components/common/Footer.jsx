@@ -11,7 +11,6 @@ const Footer = () => {
     company: [
       { name: 'About Us', href: '#about' },
       { name: 'How It Works', href: '#working' },
-      { name: 'Our Team', href: '#team' },
     ],
     product: [
       { name: 'vehnicate App', href: 'waitlist' },
