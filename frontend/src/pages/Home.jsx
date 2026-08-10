@@ -4,7 +4,6 @@ import Footer from '../components/common/Footer'
 import Hero from '../components/sections/Hero'
 import About from '../components/sections/About'
 import Working from '../components/sections/Working'
-import Team from '../components/sections/Team'
 import Community from '../components/sections/Community'
 import Contact from '../components/sections/Contact'
 import Waitlist from '../components/sections/Waitlist'
@@ -19,7 +18,6 @@ const Home = () => {
       <About />
       <Working />
       <Waitlist/>
-      <Team />
       <Contact />
       <Footer />
     </div>
