@@ -3,7 +3,6 @@ import { AnimatePresence, motion } from "framer-motion";
 import Home from "./pages/Home";
 import WaitlistPage from "./pages/WaitlistPage";
 import MapPage from "./pages/MapPage";
-import HnOpsinGuide from "./pages/hnOpsinGuide";
 import "./styles/globals.css";
 import { Analytics } from "@vercel/analytics/react";
 
@@ -37,7 +36,6 @@ function AnimatedRoutes() {
             </PageWrapper>
           }
         />
-        <Route path="/guide" element={<HnOpsinGuide />} />
       </Routes>
     </AnimatePresence>
   );
