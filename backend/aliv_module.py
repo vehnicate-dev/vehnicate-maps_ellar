@@ -72,16 +72,22 @@ class AlivRoadDefects:
         ay0 = ay[:10].mean()
         az0 = az[:10].mean()
 
-        try: theta = m.acos(az0 / g)
+        """
+        for the phone, (if kept horizontal with the screen directly facing you):
+        x - downwards
+        y - right
+        z - towards you
+        """
+        try: theta = m.acos(-az0 / g) #basically like the phone's pitch... yaw and roll dont affect az0
         except: theta = 0.0
-        try: phi = m.acos(-ay0 / g)
+        try: phi = m.acos(-ay0 / g) #the phone's yaw... roll and pitch dont affect ay0
         except: phi = 0.0
 
-        AX = -Ax * m.cos(theta) + Az * m.sin(theta)
+        AX = -Ax * m.cos(theta) - Az * m.sin(theta)
         AY = -(Ax * m.sin(theta) * m.cos(phi) +
                Az * m.cos(theta) * m.cos(phi) -
                Ay * m.sin(phi))
-        AZ = -(-Ax * m.sin(theta) * m.sin(phi) -
+        AZ = -(Ax * m.sin(theta) * m.sin(phi) -
                Az * m.cos(theta) * m.sin(phi) +
                Ay * m.cos(phi))
 
