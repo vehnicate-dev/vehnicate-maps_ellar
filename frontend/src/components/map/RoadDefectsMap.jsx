@@ -1217,7 +1217,7 @@ export default function RoadDefectsMap() {
       L.control.zoom({ position: "bottomright" }).addTo(map);
 
       L.tileLayer(
-        "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+        "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=cb1_2gzd_1_d14af46dbfbc5d8f214caf08",
         { attribution: "© OpenStreetMap contributors © CARTO", subdomains: "abcd", maxZoom: 20 }
       ).addTo(map);
 
