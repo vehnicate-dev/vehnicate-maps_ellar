@@ -207,7 +207,7 @@ function applyWatermark(url, timestamp_ms, rotation = 0) {
   });
 }
 
-async function buildImagePopupHTML(row, param, frames) {
+async function buildImagePopupHTML(row, param, frames, rotation = 0) {
   const color   = getEventColor(param);
   const lastEid = row.event_id[row.event_id.length - 1];
   const tsStr   = frames.length > 0
@@ -220,7 +220,7 @@ async function buildImagePopupHTML(row, param, frames) {
     : null;
 
   const processed = await Promise.all(
-    frames.slice(0, 8).map(f => applyWatermark(f.url, f.timestamp_ms))
+    frames.slice(0, 8).map(f => applyWatermark(f.url, f.timestamp_ms, rotation))
   );
 
   let html = `<div style="font-family:monospace;max-width:500px;">`;
@@ -231,10 +231,23 @@ async function buildImagePopupHTML(row, param, frames) {
         ${tsStr
           ? `<span style="font-size:11px;color:#ccc;">${tsStr}</span>`
           : `<span style="font-size:11px;color:#ccc;">Event ${lastEid}</span>`}
-        <span style="font-size:12px;font-weight:700;color:${color};
-          background:rgba(0,0,0,0.3);padding:2px 8px;border-radius:99px;">
-          ⬡ ${param.toFixed(3)}
-        </span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:12px;font-weight:700;color:${color};
+            background:rgba(0,0,0,0.3);padding:2px 8px;border-radius:99px;">
+            ⬡ ${param.toFixed(3)}
+          </span>
+          <button onclick="window.vehnicateRotateFrame && window.vehnicateRotateFrame('${lastEid}')"
+            title="Rotate frames 90°"
+            style="background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.15);
+              border-radius:6px;width:26px;height:26px;display:flex;align-items:center;
+              justify-content:center;cursor:pointer;padding:0;flex-shrink:0;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#e0e0e0"
+              stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 1 1-2.85-6.6"/>
+              <polyline points="21 3 21 9 15 9"/>
+            </svg>
+          </button>
+        </div>
       </div>`;
 
   if (processed.length > 0) {
@@ -1063,6 +1076,8 @@ export default function RoadDefectsMap() {
   const layerCacheRef = useRef({});
   const eventCacheRef = useRef({});
   const imageCacheRef = useRef({});
+  const markersByEidRef  = useRef({});
+  const rotationCacheRef = useRef({});
   const fetchedCells  = useRef(new Set());
   const isFetchingRef = useRef(false);
   const searchPinRef  = useRef(null);
@@ -1242,6 +1257,21 @@ export default function RoadDefectsMap() {
       }
     };
   }, []);
+  useEffect(() => {
+    window.vehnicateRotateFrame = async (eid) => {
+      const current = rotationCacheRef.current[eid] || 0;
+      const next = (current + 90) % 360;
+      rotationCacheRef.current[eid] = next;
+
+      const entry = markersByEidRef.current[eid];
+      if (!entry) return;
+      const { marker, row, param } = entry;
+      const frames = imageCacheRef.current[eid] || [];
+      const html = await buildImagePopupHTML(row, param, frames, next);
+      marker.setPopupContent(html); // updates the already-open popup in place
+    };
+    return () => { delete window.vehnicateRotateFrame; };
+  }, []);
 
   // ── Viewport loader ────────────────────────────────────────────────────────
   const loadViewport = useCallback(async () => {
@@ -1335,7 +1365,9 @@ export default function RoadDefectsMap() {
         if (!imageCacheRef.current[lastEid]) {
           Object.assign(imageCacheRef.current, await fetchFramesForEvents([lastEid]));
         }
-        const html = await buildImagePopupHTML(row, param, imageCacheRef.current[lastEid] || []);
+        markersByEidRef.current[lastEid] = { marker, row, param };
+        const rotation = rotationCacheRef.current[lastEid] || 0;
+        const html = await buildImagePopupHTML(row, param, imageCacheRef.current[lastEid] || [], rotation);
         marker.bindPopup(html, { maxWidth: 520, maxHeight: 460 }).openPopup();
       });
 
