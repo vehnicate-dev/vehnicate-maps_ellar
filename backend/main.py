@@ -1,6 +1,8 @@
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 import pandas as pd
+import numpy as np
+import math
 from supabase import create_client
 from aliv_module import AlivRoadDefects
 import h3 as h3lib
@@ -8,7 +10,6 @@ import os
 from dotenv import load_dotenv
 from hexagons_update import update_hexagons
 from zoneinfo import ZoneInfo
-import math
 from distance import compute_total_distance
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -37,6 +38,16 @@ intervals, then trims 50 samples off both ends. Its output start_time / end_time
 To convert back to absolute wall-clock time:
     absolute = timesent_T0 + pd.to_timedelta(aliv_ms + TRIM_OFFSET_MS, unit='ms')
 where TRIM_OFFSET_MS = 50 * (1000 / fs) = 625 ms at fs=80.
+
+Session-level flags on `sessions`
+──────────────────────────────────
+aliv_processed : set True once Aliv has run + hexagons/ellar/distance side effects have
+                 fired for this session. process_trip() skips all of that on rerun once
+                 this is True, so hexagons/ledger/distance never double-credit.
+imu_only       : mount-orientation check (phone camera axis vs. direction of travel).
+                 Computed independently of aliv_processed, every run — including reruns
+                 of already-processed sessions — so it can be iterated on/tested against
+                 historical sessions without needing to reprocess them through Aliv.
 """
 
 load_dotenv()
@@ -50,6 +61,13 @@ TARGET_KEY = os.environ.get("TARGET_KEY")
 #ALIV_FS          = 40 # previously 80
 #ALIV_TRIM        = 50                              # samples trimmed from each end
 #ALIV_TRIM_OFFSET = ALIV_TRIM * (1000 / ALIV_FS)   # 625 ms at fs=80
+
+# ── Mount-orientation (imu_only) constants ──────────────────────────────────
+MIN_SPEED_MPS            = 1.5   # GPS fixes below this speed have unreliable course-over-ground
+ANGLE_THRESHOLD_DEG       = 35.0  # |mount yaw offset| beyond this → imu_only = True
+MIN_ACCEL_ENERGY          = 5.0   # sum(|a_gps|) needed across the trip before trusting the estimate
+GRAVITY_LOWPASS_WINDOW_S  = 1.5   # rolling window used to separate gravity from user_accel noise
+MIN_COHERENCE = 0.1  # su,sv vector magnitude / energy — below this, the direction estimate is noise-dominated
 
 app = FastAPI()
 
@@ -252,6 +270,156 @@ def run_aliv(rows: list, fs: int) -> dict:
     return result
 
 
+# ── Session-flag helpers ────────────────────────────────────────────────────
+
+def _get_session_flags(supabase_source, session_id: str) -> dict:
+    resp = (
+        supabase_source.table("sessions")
+        .select("aliv_processed")
+        .eq("session_id", session_id)
+        .execute()
+    )
+    return resp.data[0] if resp.data else {}
+
+def _mark_aliv_processed(supabase_source, session_id: str) -> None:
+    try:
+        supabase_source.table("sessions") \
+            .update({"aliv_processed": True}) \
+            .eq("session_id", session_id) \
+            .execute()
+    except Exception as err:
+        print(f"[process_trip] aliv_processed update failed: {err}")
+
+
+# ── Mount-orientation check (imu_only) ──────────────────────────────────────
+# Phone is mounted with its z-axis (camera) meant to point along the vehicle's
+# direction of travel. We estimate the yaw offset between the two by
+# correlating GPS-derived longitudinal acceleration (ground truth, axis-
+# convention-free) against the horizontal components of the phone's gravity-
+# compensated acceleration (user_accel_x/y/z), expressed in a basis anchored
+# on the phone's own z-axis. No magnetometer is available, so this only works
+# when the trip has genuine accel/braking events — see MIN_ACCEL_ENERGY.
+
+def _wrap180(angle_deg: float) -> float:
+    """Wrap an angle to (-180, 180]."""
+    return (angle_deg + 180) % 360 - 180
+
+def _estimate_gravity(imu_df: pd.DataFrame, window_s: float = GRAVITY_LOWPASS_WINDOW_S) -> np.ndarray:
+    """Low-pass the RAW accel (which still contains gravity) to get the
+    slowly-varying gravity direction in phone-frame, per IMU row.
+
+    Uses a rolling median (per-axis) rather than a rolling mean: a mean gets
+    dragged by short bump/pothole spikes and by sustained braking/accel
+    events that approach the window length, both of which bias the inferred
+    'down' direction. A median is far less sensitive to that kind of
+    short-duration outlier since it only shifts once outliers dominate the
+    window.
+    """
+    fs_local = estimate_fs(imu_df)
+    win = max(int(window_s * fs_local), 3)
+    if win % 2 == 0:
+        win += 1  # odd window keeps the median well-defined/centered
+
+    g = imu_df[["accel_x", "accel_y", "accel_z"]].rolling(win, center=True, min_periods=1).median()
+    norm = np.linalg.norm(g.values, axis=1, keepdims=True)
+    norm[norm == 0] = 1.0
+    return g.values / norm
+
+def estimate_mount_yaw_offset(gps_df: pd.DataFrame, imu_df: pd.DataFrame) -> tuple[float, float]:
+    """
+    Returns (mount_yaw_offset_deg, signal_energy). signal_energy is the sum
+    of |GPS-derived accel| across all usable windows — gate on this before
+    trusting the angle, since a trip with no accel/braking events carries no
+    information about mount alignment.
+
+    Also gates on 'coherence' = |su, sv| / energy: even when total energy is
+    high, su/sv can still be small/noise-dominated (e.g. events partially
+    cancelling, or a corrupted gravity estimate on a rough/congested trip),
+    in which case atan2 becomes extremely sensitive to noise. Low coherence
+    is treated the same as low energy — caller should leave imu_only
+    untouched rather than trust the angle.
+    """
+    g = gps_df.sort_values("timestamp_ms").reset_index(drop=True)
+    g["speed_prev"] = g["speed"].shift(1)
+    g["t_prev"] = g["timestamp_ms"].shift(1)
+    g = g.dropna(subset=["speed_prev", "t_prev"])
+    g = g[(g["speed"] >= MIN_SPEED_MPS) & (g["speed_prev"] >= MIN_SPEED_MPS)]
+    if g.empty:
+        return 0.0, 0.0
+
+    dt_s = (g["timestamp_ms"] - g["t_prev"]) / 1000.0
+    a_gps = (g["speed"] - g["speed_prev"]) / dt_s    # signed, m/s^2
+
+    imu = imu_df.sort_values("timestamp_ms").reset_index(drop=True)
+    gravity_hat = _estimate_gravity(imu)
+    camera_hat = np.array([0.0, 0.0, -1.0])
+    user_acc = imu[["user_accel_x", "user_accel_y", "user_accel_z"]].values
+
+    u_hats, v_hats = [], []
+    fallback_u = np.array([1.0, 0.0, 0.0])
+    for gh in gravity_hat:
+        u = camera_hat - np.dot(camera_hat, gh) * gh   # camera axis, projected horizontal
+        u_norm = np.linalg.norm(u)
+        u = u / u_norm if u_norm > 1e-6 else fallback_u
+        v = np.cross(gh, u)                          # in-plane, perpendicular to u
+        u_hats.append(u)
+        v_hats.append(v)
+    u_hats, v_hats = np.array(u_hats), np.array(v_hats)
+
+    a_u_all = np.einsum("ij,ij->i", user_acc, u_hats)
+    a_v_all = np.einsum("ij,ij->i", user_acc, v_hats)
+
+    su = sv = energy = 0.0
+    for t0, t1, ag in zip(g["t_prev"], g["timestamp_ms"], a_gps):
+        mask = (imu["timestamp_ms"] >= t0) & (imu["timestamp_ms"] <= t1)
+        if not mask.any():
+            continue
+        su += a_u_all[mask.values].mean() * ag
+        sv += a_v_all[mask.values].mean() * ag
+        energy += abs(ag)
+
+    if su == 0 and sv == 0:
+        return 0.0, energy
+
+    magnitude = math.hypot(su, sv)
+    coherence = magnitude / energy if energy > 0 else 0.0
+    if coherence < MIN_COHERENCE:
+        print(f"[estimate_mount_yaw_offset] low coherence ({coherence:.2f} < {MIN_COHERENCE}), "
+            f"su={su:.2f} sv={sv:.2f} energy={energy:.2f} — angle unreliable, treating as zero-energy.")
+        return 0.0, 0.0   # forces caller's MIN_ACCEL_ENERGY gate to reject it
+
+    return math.degrees(math.atan2(sv, su)), energy
+
+def _update_imu_only(supabase_source, session_id: str, gps_df: pd.DataFrame, imu_df: pd.DataFrame) -> None:
+    """Runs every time process_trip is invoked, independent of aliv_processed,
+    so it can be iterated on/tested against sessions already processed by Aliv.
+
+    imu_only defaults to True at the DB level (fail-closed: treat a session as
+    IMU-only/unreliable-mount until proven otherwise). This function only ever
+    writes when it has a confident measurement:
+      - offset within ANGLE_THRESHOLD_DEG  -> write False (mount confirmed aligned)
+      - offset beyond ANGLE_THRESHOLD_DEG  -> write True  (mount confirmed misaligned)
+    If the signal is too weak or incoherent to trust, it writes nothing and
+    leaves the column at whatever it already is (the default True for new rows).
+    """
+    mount_yaw_deg, signal_energy = estimate_mount_yaw_offset(gps_df, imu_df)
+    print(f"[process_trip] mount yaw offset: {mount_yaw_deg:.1f}deg (energy={signal_energy:.1f})")
+
+    if signal_energy < MIN_ACCEL_ENERGY:
+        print(f"[process_trip] insufficient accel signal ({signal_energy:.1f} < {MIN_ACCEL_ENERGY}), leaving imu_only untouched.")
+        return
+
+    imu_only_value = abs(mount_yaw_deg) > ANGLE_THRESHOLD_DEG
+    try:
+        supabase_source.table("sessions") \
+            .update({"imu_only": imu_only_value}) \
+            .eq("session_id", session_id) \
+            .execute()
+        print(f"[process_trip] imu_only set to {imu_only_value} (offset={mount_yaw_deg:.1f}deg, threshold={ANGLE_THRESHOLD_DEG})")
+    except Exception as imu_only_err:
+        print(f"[process_trip] imu_only update failed: {imu_only_err}")
+
+
 # ── Core processing ────────────────────────────────────────────────────────────
 
 def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str, end_time: str):
@@ -259,6 +427,11 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
 
     supabase_source = create_client(SOURCE_URL, SOURCE_KEY)
     supabase_target = create_client(TARGET_URL, TARGET_KEY)
+
+    flags = _get_session_flags(supabase_source, session_id)
+    already_processed = bool(flags.get("aliv_processed"))
+    if already_processed:
+        print(f"[process_trip] session {session_id} already aliv_processed — will still re-check imu_only, will skip Aliv/hexagons/distance.")
 
     # ── 1. Fetch IMU data ──────────────────────────────────────────────────────
     imu_rows = fetch_all_pages(
@@ -298,6 +471,16 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
     # T0: the absolute UTC time of the first IMU row – anchor for Aliv's time axis.
     timesent_T0 = pd.to_datetime(df["timestamp_ms"].iloc[0], unit="ms", utc=True)
 
+    # ── 3a. Mount-orientation check (imu_only) ─────────────────────────────────
+    # Runs regardless of aliv_processed — safe to rerun, has no ledger/hexagon
+    # side effects, and this lets you test the logic against sessions Aliv has
+    # already fully processed.
+    _update_imu_only(supabase_source, session_id, gps_df, imu_df)
+
+    if already_processed:
+        print("[process_trip] Finished (imu_only re-check only).")
+        return
+
     # ── 3b. Compute total distance and update sessions table ───────────────────
     total_distance_m = compute_total_distance(gps_df)
     print(f"[process_trip] Total distance: {total_distance_m:.2f} m")
@@ -309,7 +492,7 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
             .execute()
     except Exception as dist_err:
         print(f"[process_trip] distance update failed: {dist_err}")
-    
+
     # ── 3c. Increment cumulative distance in user_details ──────────────────────
     try:
         resp = (
@@ -332,13 +515,14 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
                 .execute()
     except Exception as user_dist_err:
         print(f"[process_trip] user_details distance update failed: {user_dist_err}")
-        
+
     # ── 4. Run Aliv ──────────────
     aliv_input = build_aliv_input(df)
     result = run_aliv(aliv_input, fs=fs)
 
     if not result.get("speedbreakers"):
         print("[process_trip] No events detected.")
+        _mark_aliv_processed(supabase_source, session_id)
         return
     aliv_trim_offset = 50 * (1000 / fs)
 
@@ -348,6 +532,7 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
     )
     print(f"[process_trip] Enriched events: {len(enriched_events)}")
     if not enriched_events:
+        _mark_aliv_processed(supabase_source, session_id)
         return
 
     enriched_events = [sanitize_for_json(e) for e in enriched_events]
@@ -374,6 +559,7 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
     except Exception as hex_err:
         print(f"[hexagons] update failed: {hex_err}")
 
+    _mark_aliv_processed(supabase_source, session_id)
     print("[process_trip] Finished.")
 
 

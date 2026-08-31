@@ -42,6 +42,68 @@ function boundsToH3Cells(bounds) {
 }
 
 // ─── Supabase fetchers ────────────────────────────────────────────────────────
+// Given a list of imu_events_ids, resolve each one's session_id + whether
+// that session's imu_only flag blocks its footage from being shown.
+async function fetchEventsSessionInfo(eventIds) {
+  if (!eventIds.length) return {};
+
+  const { data: events, error } = await supabase
+    .from("imu_events")
+    .select("imu_events_id, session_id, start_time, end_time")
+    .in("imu_events_id", eventIds);
+  if (error) { console.error("[supabase] imu_events (session info):", error); return {}; }
+
+  const sessionIds = [...new Set((events || []).map((e) => e.session_id))];
+  if (!sessionIds.length) return {};
+
+  const { data: sessions, error: sessErr } = await supabase
+    .from("sessions")
+    .select("session_id, imu_only")
+    .in("session_id", sessionIds);
+  if (sessErr) { console.error("[supabase] sessions (imu_only):", sessErr); return {}; }
+
+  const imuOnlyBySession = {};
+  (sessions || []).forEach((s) => { imuOnlyBySession[s.session_id] = s.imu_only; });
+
+  const map = {};
+  (events || []).forEach((ev) => {
+    map[ev.imu_events_id] = {
+      session_id: ev.session_id,
+      start_time: ev.start_time,
+      end_time: ev.end_time,
+      // fail-closed: if we can't find the session's flag, treat as blocked —
+      // matches the sessions.imu_only DEFAULT TRUE convention.
+      imu_only: imuOnlyBySession[ev.session_id] ?? true,
+    };
+  });
+  return map;
+}
+
+// Walk a defect point's event_id array (chronological, oldest → newest) from
+// the end, and return the most recent eid whose session has imu_only=false.
+// Returns null if every session covering this point is imu_only.
+function pickImageEligibleEventId(eventIds, sessionInfoMap) {
+  for (let i = eventIds.length - 1; i >= 0; i--) {
+    const eid = eventIds[i];
+    const info = sessionInfoMap[eid];
+    if (info && info.imu_only === false) return eid;
+  }
+  return null;
+}
+
+// Fallback lookup used only when a row has no last_confirmed_at (e.g. a
+// point with a single detection, where the backend's "new point" insert
+// path doesn't stamp last_confirmed_at).
+async function fetchEventTimestamp(eid) {
+  const { data, error } = await supabase
+    .from("imu_events")
+    .select("start_time")
+    .eq("imu_events_id", eid)
+    .maybeSingle();
+  if (error) { console.error("[supabase] event timestamp:", error); return null; }
+  return data?.start_time || null;
+}
+
 async function fetchEventsForCells(cells, cachedCells) {
   const toFetch = cells.filter((c) => !cachedCells.has(c));
   if (!toFetch.length) return [];
@@ -56,7 +118,7 @@ async function fetchEventsForCells(cells, cachedCells) {
     chunks.map(async (chunk) => {
       const { data, error } = await supabase
         .from("hexagons")
-        .select("h3_index, location, parameters, event_id, confidence")
+        .select("h3_index, location, parameters, event_id, confidence, last_confirmed_at")
         .in("h3_index", chunk);
       if (error) { console.error("[supabase] roaddefects:", error); return []; }
       return data || [];
@@ -206,14 +268,13 @@ function applyWatermark(url, timestamp_ms, rotation = 0) {
     img.src = url;
   });
 }
-
-async function buildImagePopupHTML(row, param, frames, rotation = 0) {
-  const color   = getEventColor(param);
-  const lastEid = row.event_id[row.event_id.length - 1];
-  const tsStr   = frames.length > 0
+async function buildImagePopupHTML(row, param, frames, rotation = 0, opts = {}) {
+  const color = getEventColor(param);
+  const eid   = opts.eid; // the eligible (imu_only=false) event whose frames these are, or undefined
+  const tsStr = frames.length > 0
     ? (() => {
         const d = new Date(frames[0].timestamp_ms);
-        const p = (n) => String(n).padStart(2,"0");
+        const p = (n) => String(n).padStart(2, "0");
         return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} `+
               `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
       })()
@@ -230,13 +291,14 @@ async function buildImagePopupHTML(row, param, frames, rotation = 0) {
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
         ${tsStr
           ? `<span style="font-size:11px;color:#ccc;">${tsStr}</span>`
-          : `<span style="font-size:11px;color:#ccc;">Event ${lastEid}</span>`}
+          : `<span style="font-size:11px;color:#ccc;">${eid ? `Event ${eid}` : "No verified footage"}</span>`}
         <div style="display:flex;align-items:center;gap:6px;">
           <span style="font-size:12px;font-weight:700;color:${color};
             background:rgba(0,0,0,0.3);padding:2px 8px;border-radius:99px;">
             ⬡ ${param.toFixed(3)}
           </span>
-          <button onclick="window.vehnicateRotateFrame && window.vehnicateRotateFrame('${lastEid}')"
+          ${eid ? `
+          <button onclick="window.vehnicateRotateFrame && window.vehnicateRotateFrame('${eid}')"
             title="Rotate frames 90°"
             style="background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.15);
               border-radius:6px;width:26px;height:26px;display:flex;align-items:center;
@@ -246,7 +308,7 @@ async function buildImagePopupHTML(row, param, frames, rotation = 0) {
               <path d="M21 12a9 9 0 1 1-2.85-6.6"/>
               <polyline points="21 3 21 9 15 9"/>
             </svg>
-          </button>
+          </button>` : ``}
         </div>
       </div>`;
 
@@ -259,21 +321,22 @@ async function buildImagePopupHTML(row, param, frames, rotation = 0) {
     }
     html += `</div>`;
   } else {
-    html += `<div style="font-size:11px;color:#555;font-style:italic;">No frames</div>`;
+    html += `<div style="font-size:11px;color:#555;font-style:italic;">
+      ${eid ? "No frames" : "No verified footage available for this defect yet"}
+    </div>`;
   }
 
   html += `</div></div>`;
   return html;
 }
 
-function buildHoverHTML(row, param) {
+function buildHoverHTML(row, param, lastDetectedStr) {
   const color = getEventColor(param);
-  const lastEid = row.event_id[row.event_id.length - 1];
   return `
     <div style="font-family:monospace;font-size:12px;min-width:180px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-        <span style="color:#ccc;font-weight:600;">Event ID: </span>
-        <span style="color:#fff;">${lastEid}</span>
+        <span style="color:#ccc;font-weight:600;">Last detected</span>
+        <span style="color:#fff;">${lastDetectedStr || "…"}</span>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <span style="color:#ccc;font-weight:600;">Parameter</span>
@@ -1078,6 +1141,8 @@ export default function RoadDefectsMap() {
   const imageCacheRef = useRef({});
   const markersByEidRef  = useRef({});
   const rotationCacheRef = useRef({});
+  const imageEligibilityCacheRef = useRef({}); // rowKey -> eligible eid (or null)
+  const lastDetectedTsCacheRef   = useRef({}); // eid -> formatted IST string
   const fetchedCells  = useRef(new Set());
   const isFetchingRef = useRef(false);
   const searchPinRef  = useRef(null);
@@ -1340,6 +1405,7 @@ export default function RoadDefectsMap() {
       const param   = parseFloat(row.parameters[row.parameters.length - 1]);
       const lastEid = row.event_id[row.event_id.length - 1];
       const color   = getEventColor(param);
+      const rowKey  = `${lat.toFixed(6)},${lon.toFixed(6)}`;
 
       const marker = L.circle([lat, lon], {
         radius: 4,
@@ -1349,11 +1415,26 @@ export default function RoadDefectsMap() {
         weight: 1.5,
       });
 
-      marker.on("mouseover", (e) => {
-        marker.bindTooltip(buildHoverHTML(row, param), {
+      marker.on("mouseover", async (e) => {
+        let tsStr = row.last_confirmed_at
+          ? formatISTDate(row.last_confirmed_at)
+          : lastDetectedTsCacheRef.current[lastEid];
+
+        marker.bindTooltip(buildHoverHTML(row, param, tsStr), {
           sticky: true, opacity: 1, className: "rdm-tooltip",
         }).openTooltip(e.latlng);
         marker.setStyle({ fillOpacity: 1, weight: 3 });
+
+        if (!tsStr) {
+          if (!lastDetectedTsCacheRef.current[lastEid]) {
+            const fetched = await fetchEventTimestamp(lastEid);
+            if (fetched) lastDetectedTsCacheRef.current[lastEid] = formatISTDate(fetched);
+          }
+          const resolved = lastDetectedTsCacheRef.current[lastEid];
+          if (resolved && marker.isTooltipOpen()) {
+            marker.setTooltipContent(buildHoverHTML(row, param, resolved));
+          }
+        }
       });
 
       marker.on("mouseout", () => {
@@ -1362,12 +1443,28 @@ export default function RoadDefectsMap() {
       });
 
       marker.on("click", async () => {
-        if (!imageCacheRef.current[lastEid]) {
-          Object.assign(imageCacheRef.current, await fetchFramesForEvents([lastEid]));
+        let eligibleEid = imageEligibilityCacheRef.current[rowKey];
+
+        if (eligibleEid === undefined) {
+          const sessionInfoMap = await fetchEventsSessionInfo(row.event_id || []);
+          eligibleEid = pickImageEligibleEventId(row.event_id || [], sessionInfoMap);
+          imageEligibilityCacheRef.current[rowKey] = eligibleEid; // may be null — cached either way
         }
-        markersByEidRef.current[lastEid] = { marker, row, param };
-        const rotation = rotationCacheRef.current[lastEid] || 0;
-        const html = await buildImagePopupHTML(row, param, imageCacheRef.current[lastEid] || [], rotation);
+
+        if (!eligibleEid) {
+          const html = await buildImagePopupHTML(row, param, [], 0, {});
+          marker.bindPopup(html, { maxWidth: 520, maxHeight: 460 }).openPopup();
+          return;
+        }
+
+        if (!imageCacheRef.current[eligibleEid]) {
+          Object.assign(imageCacheRef.current, await fetchFramesForEvents([eligibleEid]));
+        }
+        markersByEidRef.current[eligibleEid] = { marker, row, param };
+        const rotation = rotationCacheRef.current[eligibleEid] || 0;
+        const html = await buildImagePopupHTML(
+          row, param, imageCacheRef.current[eligibleEid] || [], rotation, { eid: eligibleEid }
+        );
         marker.bindPopup(html, { maxWidth: 520, maxHeight: 460 }).openPopup();
       });
 
@@ -1432,6 +1529,7 @@ export default function RoadDefectsMap() {
     layerCacheRef.current = {};
     eventCacheRef.current = {};
     imageCacheRef.current = {};
+    imageEligibilityCacheRef.current = {};
     fetchedCells.current  = new Set();
     isFetchingRef.current = false;
 
