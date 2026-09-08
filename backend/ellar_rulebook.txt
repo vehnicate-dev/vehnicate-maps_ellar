@@ -1,0 +1,64 @@
+for h in hexagons_covered_during_trip:
+    if imu_only==false:
+        multiplier = 1.0
+    else:
+        multiplier = 0.5
+    for i in detections:
+        if i is unique: #i.e., the detection isnt within 15m of any other detection acc to gps
+            N = number of users that have travelled in this hexagon previously + 1
+            if N<=100:
+                discovery_reward = multiplier * (4 - 2·log10(N))
+            else:
+                ellar_hex = ellar_hex column value from the hexagons table for this hexagon
+                rD = number of unique roaddefects in that hexagon
+                discovery_reward = multiplier * (ell_hex)/rD
+            user_frozen_ellar_balance+=discovery_reward
+        else: # i.e, this detection is a confirmation of an existing roaddefect... thereby we give confirmation reward to the user if eligible
+            if ego_user is eligible(i):
+                """
+                the user is eligible for the confirmation reward of the roaddefect "i" iff:
+                    - they arent the roaddefect's discoverer
+                    - they havent received the confirmation reward for this i roaddefect previously
+                """
+                # the nd column in the hexagons table may contain one user multiple times -
+                # each entry indicating each time the user encountered the defect...
+                # but for the reward computation, we only consider unique users.
+                nD = number of unique users that have flagged this roaddefect previously + 1
+                confirmation_reward = multiplier * (2 - 1 * log10(nD))
+                user_liquid_ellar_balance+=confirmation_reward
+                if not i.legit:
+                    # checks the "hexagons" table (rd_trip_ids column) for the session that had flagged the roaddefect "i" for the first time:
+                    sessionid_discoverer = discoverer(i)
+
+                    # use that sessionid to find out the "N" of the user in that hexagon in the "trip_id" column of the hexagons table
+                    N_of_discoverer = index(trip_id[sessionid_discoverer]) + 1
+
+                    # unfreeze the frozen_ellar for the discoverer as soon as the roaddefect is confirmed by another user
+                    # NOTE: For the multiplier being used during unfreezing, refer the sessions table using the sessionid_discoverer
+                    discoverer_frozen_ellar_balance-=(4-2*log10(N_of_discoverer)) * multiplier
+                    discoverer_liquid_ellar_balance+=(4-2*log10(N_of_discoverer)) * multiplier
+
+                    i.legit = True # the legit column corresponding to the roaddefect is set to True because someone else independently verified the presence of the roaddefect
+                i.confirmed = True # may be the discoverer drove over the roaddefect... this counts as a confirmation but the discoverer isnt eligible to receive the confirmation reward.
+
+    if (N-10+1)th trip exists:
+        # i.e., this trip is the 10th trip after a certain trip, x.
+        # so its time to check the legitimacy of the roaddefects disovered during the xth trip
+        sessionid_xth_trip = N-10+1 # from the trip_ids column of hexagons table
+        for i in roaddefects:
+            if rd_trip_ids[i][0]==sessionid_xth_trip: # the roaddefects that were discovered during the xth session
+                if !(i.confirmed==True or i.confidence>=30):
+                    discoverer_of_illegit_roaddefect = i.user_id[0]
+
+                    # since for a non-confirmed roaddefect, the discoverer will be the one and only user in the rd_trip_ids column of the roaddefect
+                    sessionid_discoverer = rd_trips_id[i][0]
+    
+                    # use that sessionid to find out the "N" of the user in that hexagon in the "trip_id" column of the hexagons table
+                    N_of_discoverer = index(trip_id[sessionid_discoverer]) + 1
+                    # NOTE: For the multiplier being used during unfreezing, refer the sessions table using the sessionid_discoverer
+                    frozen_ellar_balance[discoverer_of_illegit_roaddefect]-= 1.00 * multiplier * (4-2*log10(N_of_discoverer))
+                    liquid_ellar_balance[discoverer_of_illegit_roaddefect]-= 0.01 * multiplier * (4-2*log10(N_of_discoverer))
+                    i.remove() # remove the roaddefect row from the hexagons table.
+
+                
+

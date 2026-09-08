@@ -275,7 +275,7 @@ def run_aliv(rows: list, fs: int) -> dict:
 def _get_session_flags(supabase_source, session_id: str) -> dict:
     resp = (
         supabase_source.table("sessions")
-        .select("aliv_processed")
+        .select("aliv_processed, imu_only")
         .eq("session_id", session_id)
         .execute()
     )
@@ -390,7 +390,13 @@ def estimate_mount_yaw_offset(gps_df: pd.DataFrame, imu_df: pd.DataFrame) -> tup
 
     return math.degrees(math.atan2(sv, su)), energy
 
-def _update_imu_only(supabase_source, session_id: str, gps_df: pd.DataFrame, imu_df: pd.DataFrame) -> None:
+def _update_imu_only(
+    supabase_source,
+    session_id: str,
+    gps_df: pd.DataFrame,
+    imu_df: pd.DataFrame,
+    current_imu_only: bool,
+) -> bool:
     """Runs every time process_trip is invoked, independent of aliv_processed,
     so it can be iterated on/tested against sessions already processed by Aliv.
 
@@ -400,14 +406,18 @@ def _update_imu_only(supabase_source, session_id: str, gps_df: pd.DataFrame, imu
       - offset within ANGLE_THRESHOLD_DEG  -> write False (mount confirmed aligned)
       - offset beyond ANGLE_THRESHOLD_DEG  -> write True  (mount confirmed misaligned)
     If the signal is too weak or incoherent to trust, it writes nothing and
-    leaves the column at whatever it already is (the default True for new rows).
+    leaves the column at whatever it already is.
+
+    Returns the resolved imu_only value (freshly written value, or
+    current_imu_only if left untouched / write failed) so the caller can pass
+    a single authoritative value down to update_hexagons/ledger.
     """
     mount_yaw_deg, signal_energy = estimate_mount_yaw_offset(gps_df, imu_df)
     print(f"[process_trip] mount yaw offset: {mount_yaw_deg:.1f}deg (energy={signal_energy:.1f})")
 
     if signal_energy < MIN_ACCEL_ENERGY:
         print(f"[process_trip] insufficient accel signal ({signal_energy:.1f} < {MIN_ACCEL_ENERGY}), leaving imu_only untouched.")
-        return
+        return current_imu_only
 
     imu_only_value = abs(mount_yaw_deg) > ANGLE_THRESHOLD_DEG
     try:
@@ -418,8 +428,9 @@ def _update_imu_only(supabase_source, session_id: str, gps_df: pd.DataFrame, imu
         print(f"[process_trip] imu_only set to {imu_only_value} (offset={mount_yaw_deg:.1f}deg, threshold={ANGLE_THRESHOLD_DEG})")
     except Exception as imu_only_err:
         print(f"[process_trip] imu_only update failed: {imu_only_err}")
+        return current_imu_only
 
-
+    return imu_only_value
 # ── Core processing ────────────────────────────────────────────────────────────
 
 def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str, end_time: str):
@@ -430,9 +441,9 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
 
     flags = _get_session_flags(supabase_source, session_id)
     already_processed = bool(flags.get("aliv_processed"))
+    current_imu_only = bool(flags.get("imu_only", True))  # fail-closed default, matches DB default
     if already_processed:
         print(f"[process_trip] session {session_id} already aliv_processed — will still re-check imu_only, will skip Aliv/hexagons/distance.")
-
     # ── 1. Fetch IMU data ──────────────────────────────────────────────────────
     imu_rows = fetch_all_pages(
         supabase_source,
@@ -475,7 +486,7 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
     # Runs regardless of aliv_processed — safe to rerun, has no ledger/hexagon
     # side effects, and this lets you test the logic against sessions Aliv has
     # already fully processed.
-    _update_imu_only(supabase_source, session_id, gps_df, imu_df)
+    imu_only = _update_imu_only(supabase_source, session_id, gps_df, imu_df, current_imu_only)
 
     if already_processed:
         print("[process_trip] Finished (imu_only re-check only).")
@@ -555,7 +566,7 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
 
     # ── 7. Update hexagons ─────────────────────────────────────────────────────
     try:
-        update_hexagons(supabase_target, inserted_events)
+        update_hexagons(supabase_target, inserted_events, imu_only)
     except Exception as hex_err:
         print(f"[hexagons] update failed: {hex_err}")
 

@@ -31,8 +31,8 @@ def ledger_discovery_frozen(
     amount: float,
     h3_index: str,
     hex_row_id,          # hexagons.id of the newly inserted rD row
-    n: int,              # generation index of the discovering trip
-    k: int,              # number of rD flags this trip made
+    n: int,               # generation index of the discovering trip
+    k: int,               # number of rD flags this trip made
 ) -> None:
     """Discovery reward — frozen until legit check clears it."""
     comment = (
@@ -42,6 +42,12 @@ def ledger_discovery_frozen(
     _ledger_entry(supabase_target, to_user_id, amount, "frozen", comment)
 
 
+# NOTE: no longer called by hexagons_update.py — kept for now since it's
+# harmless, but nothing wires into it anymore now that the 5-trip
+# "late reward" bonus mechanism has been replaced by instant
+# unfreeze-on-first-confirmation (see ledger_confirmation_unfreeze below)
+# and the illegitimacy penalty (see ledger_illegit_penalty below). Safe to
+# delete if you don't want dead code sitting around — just say the word.
 def ledger_discovery_liquid(
     supabase_target: Client,
     to_user_id: str,
@@ -66,6 +72,9 @@ def ledger_discovery_liquid(
     _ledger_entry(supabase_target, to_user_id, amount, "liquid", comment)
 
 
+# NOTE: same as above — no longer called; the late-legitimacy top-up concept
+# it backed doesn't exist in the current design. Kept for now, flag if you
+# want it removed.
 def ledger_late_legit_liquid(
     supabase_target: Client,
     to_user_id: str,
@@ -98,3 +107,53 @@ def ledger_confirmation_liquid(
         f"hexagons.roaddefect_id={hex_row_id} | nd={nd}"
     )
     _ledger_entry(supabase_target, to_user_id, amount, "liquid", comment)
+
+
+def ledger_confirmation_unfreeze(
+    supabase_target: Client,
+    to_user_id: str,
+    amount: float,
+    h3_index: str,
+    hex_row_id,
+    n: int,               # generation index of the discoverer's own trip
+) -> None:
+    """
+    Moves a discoverer's original discovery reward from frozen to liquid,
+    triggered by the FIRST eligible confirmation of their road defect (i.e.
+    the moment it becomes 'legit'). Writes two rows: a debit against frozen
+    and a matching credit against liquid, so the ledger reflects the actual
+    balance movement rather than a net figure.
+    """
+    comment = (
+        f"Discovery reward unfrozen (first confirmation) | hex={h3_index} | "
+        f"hexagons.roaddefect_id={hex_row_id} | n={n}"
+    )
+    _ledger_entry(supabase_target, to_user_id, -amount, "frozen", comment)
+    _ledger_entry(supabase_target, to_user_id, amount, "liquid", comment)
+
+
+def ledger_illegit_penalty(
+    supabase_target: Client,
+    from_user_id: str,
+    penalty_frozen: float,
+    penalty_liquid: float,
+    h3_index: str,
+    hex_row_id,
+    n: int,               # generation index of the discoverer's own trip
+) -> None:
+    """
+    Penalizes a discoverer whose road defect failed the 5-trip legitimacy
+    check (never confirmed, confidence stayed below 30): the original frozen
+    discovery reward for that defect is removed entirely, plus an additional
+    1% of that reward is docked from liquid. Writes two rows so the ledger
+    shows the frozen removal and the liquid penalty separately.
+    """
+    comment = (
+        f"Illegitimate road defect penalty | hex={h3_index} | "
+        f"hexagons.roaddefect_id={hex_row_id} | n={n}"
+    )
+    _ledger_entry(supabase_target, from_user_id, -penalty_frozen, "frozen", comment)
+    _ledger_entry(
+        supabase_target, from_user_id, -penalty_liquid, "liquid",
+        comment + " (1% liquid penalty)",
+    )

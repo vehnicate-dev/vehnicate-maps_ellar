@@ -6,13 +6,14 @@ import { createClient } from "@supabase/supabase-js";
 
 // ─── Supabase config ──────────────────────────────────────────────────────────
 const SUPABASE_URL = "https://mmjusghgeedycrrfdejg.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1tanVzZ2hnZWVkeWNycmZkZWpnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTQwMjM2MCwiZXhwIjoyMDkwOTc4MzYwfQ.iPNrIQbKZy3seMcP6dY76uRg-BAYFkGEMDhoN8o1ng8";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1tanVzZ2hnZWVkeWNycmZkZWpnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU0MDIzNjAsImV4cCI6MjA5MDk3ODM2MH0.9HlVedDwECf_kAV0iOWB6Gsww8F_Sqx_ugdZUIsG2Yg";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const H3_RES = 9;
 const CITIES = ["Chennai", "Surat", "Bangalore", "Mumbai", "Hyderabad", "Pune", "Kolkata"];
 const CITIES_LOOP = [...CITIES, CITIES[0]];
+const MAX_DETAIL_CELLS = 40000; // safety valve — skip fetch if viewport would need more cells than this
 
 // ─── Color ramp ───────────────────────────────────────────────────────────────
 function getEventColor(param) {
@@ -41,38 +42,73 @@ function boundsToH3Cells(bounds) {
   return h3.polygonToCells(polygon, H3_RES);
 }
 
+// ─── IP geolocation (rough, no permission prompt) ────────────────────────────
+const DEFAULT_CENTER = [13.05, 80.22]; // Chennai fallback
+const DEFAULT_ZOOM = 13;
+
+async function fetchIPLocation(timeoutMs = 2500) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch("https://ipwho.is/", { signal: controller.signal });
+    clearTimeout(timer);
+    const data = await res.json();
+    if (data && data.success !== false && typeof data.latitude === "number") {
+      return { lat: data.latitude, lon: data.longitude, city: data.city || null };
+    }
+  } catch (e) {
+    console.warn("[ip-geo] falling back to default center:", e);
+  }
+  return null;
+}
+
 // ─── Supabase fetchers ────────────────────────────────────────────────────────
-// Given a list of imu_events_ids, resolve each one's session_id + whether
-// that session's imu_only flag blocks its footage from being shown.
 async function fetchEventsSessionInfo(eventIds) {
   if (!eventIds.length) return {};
 
-  const { data: events, error } = await supabase
-    .from("imu_events")
-    .select("imu_events_id, session_id, start_time, end_time")
-    .in("imu_events_id", eventIds);
-  if (error) { console.error("[supabase] imu_events (session info):", error); return {}; }
+  const CHUNK_SIZE = 100;
+  const chunk = (arr) => {
+    const out = [];
+    for (let i = 0; i < arr.length; i += CHUNK_SIZE) out.push(arr.slice(i, i + CHUNK_SIZE));
+    return out;
+  };
 
-  const sessionIds = [...new Set((events || []).map((e) => e.session_id))];
+  const eventResults = await Promise.all(
+    chunk(eventIds).map(async (ids) => {
+      const { data, error } = await supabase
+        .from("imu_events")
+        .select("imu_events_id, session_id, start_time, end_time")
+        .in("imu_events_id", ids);
+      if (error) { console.error("[supabase] imu_events (session info):", error); return []; }
+      return data || [];
+    })
+  );
+  const events = eventResults.flat();
+
+  const sessionIds = [...new Set(events.map((e) => e.session_id))];
   if (!sessionIds.length) return {};
 
-  const { data: sessions, error: sessErr } = await supabase
-    .from("sessions")
-    .select("session_id, imu_only")
-    .in("session_id", sessionIds);
-  if (sessErr) { console.error("[supabase] sessions (imu_only):", sessErr); return {}; }
+  const sessionResults = await Promise.all(
+    chunk(sessionIds).map(async (ids) => {
+      const { data, error } = await supabase
+        .from("sessions")
+        .select("session_id, imu_only")
+        .in("session_id", ids);
+      if (error) { console.error("[supabase] sessions (imu_only):", error); return []; }
+      return data || [];
+    })
+  );
+  const sessions = sessionResults.flat();
 
   const imuOnlyBySession = {};
-  (sessions || []).forEach((s) => { imuOnlyBySession[s.session_id] = s.imu_only; });
+  sessions.forEach((s) => { imuOnlyBySession[s.session_id] = s.imu_only; });
 
   const map = {};
-  (events || []).forEach((ev) => {
+  events.forEach((ev) => {
     map[ev.imu_events_id] = {
       session_id: ev.session_id,
       start_time: ev.start_time,
       end_time: ev.end_time,
-      // fail-closed: if we can't find the session's flag, treat as blocked —
-      // matches the sessions.imu_only DEFAULT TRUE convention.
       imu_only: imuOnlyBySession[ev.session_id] ?? true,
     };
   });
@@ -118,7 +154,7 @@ async function fetchEventsForCells(cells, cachedCells) {
     chunks.map(async (chunk) => {
       const { data, error } = await supabase
         .from("hexagons")
-        .select("h3_index, location, parameters, event_id, confidence, last_confirmed_at")
+        .select("h3_index, lat, lon, parameters, event_id, confidence, last_confirmed_at")
         .in("h3_index", chunk);
       if (error) { console.error("[supabase] roaddefects:", error); return []; }
       return data || [];
@@ -1286,14 +1322,17 @@ export default function RoadDefectsMap() {
   useEffect(() => {
     if (mapRef.current) return;
 
-    const init = () => {
+    const init = async () => {
+      const ipLoc = await fetchIPLocation();
+      const center = ipLoc ? [ipLoc.lat, ipLoc.lon] : DEFAULT_CENTER;
+      const zoom   = ipLoc ? 12 : DEFAULT_ZOOM; // IP geo is city-accurate at best, start a touch wider
+
       const map = L.map(mapDivRef.current, {
-        center: [13.05, 80.22],
-        zoom: 13,
-        zoomControl: false,   // We add it manually below — hidden on mobile via CSS
+        center,
+        zoom,
+        zoomControl: false,
       });
 
-      // Add zoom control (CSS hides it on mobile)
       L.control.zoom({ position: "bottomright" }).addTo(map);
 
       L.tileLayer(
@@ -1302,10 +1341,13 @@ export default function RoadDefectsMap() {
       ).addTo(map);
 
       mapRef.current = map;
-      setTimeout(() => map.invalidateSize(), 100);
 
-      loadViewport();
-      loadGlobalLastDetected();
+      setTimeout(() => {
+        map.invalidateSize();
+        loadViewport();
+        loadGlobalLastDetected();
+      }, 100);
+
       let moveTimer = null;
       map.on("moveend", () => {
         clearTimeout(moveTimer);
@@ -1338,25 +1380,30 @@ export default function RoadDefectsMap() {
     return () => { delete window.vehnicateRotateFrame; };
   }, []);
 
-  // ── Viewport loader ────────────────────────────────────────────────────────
+  // ── Viewport loader — always full-detail hexagons + defects, at every zoom ──
+  function clearDetailLayers() {
+    const map = mapRef.current;
+    if (!map) return;
+    Object.values(layerCacheRef.current).forEach(layers => layers.forEach(l => map.removeLayer(l)));
+    layerCacheRef.current = {};
+  }
+
   const loadViewport = useCallback(async () => {
     const map = mapRef.current;
     if (!map || isFetchingRef.current) return;
     isFetchingRef.current = true;
 
     try {
-      const cells   = boundsToH3Cells(map.getBounds());
+      const cells = boundsToH3Cells(map.getBounds());
+      if (cells.length > MAX_DETAIL_CELLS) {
+        console.warn(`[loadViewport] ${cells.length} cells exceeds detail cap, skipping fetch — zoom in`);
+        return;
+      }
+
       const toFetch = cells.filter((c) => !fetchedCells.current.has(c));
-
       const newEvents = await fetchEventsForCells(toFetch, new Set());
-      toFetch.forEach((c) => fetchedCells.current.add(c));
-
       cells.forEach((c) => fetchedCells.current.add(c));
       if (!newEvents.length) return;
-
-      const allEventIds = newEvents.map((e) => e.event_id[e.event_id.length - 1]);
-      const newFrames = await fetchFramesForEvents(allEventIds);
-      Object.assign(imageCacheRef.current, newFrames);
 
       const byHex = {};
       for (const ev of newEvents) {
@@ -1369,7 +1416,6 @@ export default function RoadDefectsMap() {
         eventCacheRef.current[hexId].push(...events);
         drawHex(hexId, eventCacheRef.current[hexId]);
       }
-
       recomputeMaxAndApplyFilter();
     } catch (err) {
       console.error("[loadViewport]", err);
@@ -1401,7 +1447,7 @@ export default function RoadDefectsMap() {
     layers.push(hexPolygon);
 
     for (const row of rows) {
-      const [lat, lon] = row.location;
+      const { lat, lon } = row;
       const param   = parseFloat(row.parameters[row.parameters.length - 1]);
       const lastEid = row.event_id[row.event_id.length - 1];
       const color   = getEventColor(param);
@@ -1522,48 +1568,21 @@ export default function RoadDefectsMap() {
     if (!map || refreshing) return;
     setRefreshing(true);
 
-    Object.values(layerCacheRef.current).forEach((layers) =>
-      layers.forEach(l => map.removeLayer(l))
-    );
-
-    layerCacheRef.current = {};
+    clearDetailLayers();
     eventCacheRef.current = {};
-    imageCacheRef.current = {};
     imageEligibilityCacheRef.current = {};
-    fetchedCells.current  = new Set();
+    fetchedCells.current = new Set();
     isFetchingRef.current = false;
 
     try {
-      const cells     = boundsToH3Cells(map.getBounds());
-      const newEvents = await fetchEventsForCells(cells, fetchedCells.current);
-      cells.forEach((c) => fetchedCells.current.add(c));
-
-      if (newEvents.length) {
-        const allEventIds = newEvents.map((e) => e.event_id[e.event_id.length - 1]);
-        const newFrames = await fetchFramesForEvents(allEventIds);
-        Object.assign(imageCacheRef.current, newFrames);
-
-        const byHex = {};
-        for (const ev of newEvents) {
-          if (!ev.h3_index) continue;
-          if (!byHex[ev.h3_index]) byHex[ev.h3_index] = [];
-          byHex[ev.h3_index].push(ev);
-        }
-        for (const [hexId, events] of Object.entries(byHex)) {
-          eventCacheRef.current[hexId] = events;
-          drawHex(hexId, events);
-        }
-        recomputeMaxAndApplyFilter();
-        loadGlobalLastDetected();
-      } else {
-        // nothing loaded — reset threshold display (slider stays at user's chosen value)
-      }
+      await loadViewport();
+      loadGlobalLastDetected();
     } catch (err) {
       console.error("[refresh]", err);
     }
 
     setRefreshing(false);
-  }, [refreshing, recomputeMaxAndApplyFilter, loadGlobalLastDetected]);
+  }, [refreshing, loadViewport, loadGlobalLastDetected]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
