@@ -38,7 +38,7 @@ const MapPage = () => {
           Don't find your place?{" "}
           <a href={PLAY_STORE_URL} target="_blank" rel="noopener noreferrer">
             <span className="bg-gradient-to-r from-purple-400 to-pink-500 bg-clip-text text-transparent font-medium cursor-pointer hover:opacity-80 transition-opacity">
-              Download the vehnWay app
+              Download the vehnicate app
             </span>
           </a>{" "}
           and drive through your area to put it on the map.
