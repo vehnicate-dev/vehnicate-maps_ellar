@@ -13,6 +13,12 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const H3_RES = 9;
 const CITIES = ["Chennai", "Surat", "Bangalore", "Mumbai", "Hyderabad", "Pune", "Kolkata"];
 const CITIES_LOOP = [...CITIES, CITIES[0]];
+const INDIA_BOUNDS = [[6.5, 68.0], [37.6, 97.5]]; // SW, NE corners
+const QUICK_ZOOM_TARGETS = [
+  { label: "Chennai",   lat: 13.0827, lon: 80.2707, zoom: 12 },
+  { label: "Bangalore", lat: 12.9716, lon: 77.5946, zoom: 12 },
+];
+const MIN_ZOOM_FOR_FETCH = 12;
 const MAX_DETAIL_CELLS = 40000; // safety valve — skip fetch if viewport would need more cells than this
 
 // ─── Color ramp ───────────────────────────────────────────────────────────────
@@ -41,7 +47,23 @@ function boundsToH3Cells(bounds) {
   ];
   return h3.polygonToCells(polygon, H3_RES);
 }
-
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+function estimateH3CellCount(bounds, res) {
+  const north = bounds.getNorth(), south = bounds.getSouth();
+  const east = bounds.getEast(), west = bounds.getWest();
+  const widthKm = haversineKm((north + south) / 2, west, (north + south) / 2, east);
+  const heightKm = haversineKm(north, (east + west) / 2, south, (east + west) / 2);
+  const areaKm2 = widthKm * heightKm;
+  const avgCellAreaKm2 = h3.getHexagonAreaAvg(res, "km2");
+  return areaKm2 / avgCellAreaKm2;
+}
 // ─── IP geolocation (rough, no permission prompt) ────────────────────────────
 const DEFAULT_CENTER = [13.05, 80.22]; // Chennai fallback
 const DEFAULT_ZOOM = 13;
@@ -401,7 +423,21 @@ const styles = `
     width: 100%;
     height: 100%;
   }
-
+  #rdm-zoom-hint {
+    position: absolute;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 8px 18px;
+    border-radius: 16px;
+    background: rgba(20,20,30,0.9);
+    backdrop-filter: blur(14px);
+    border: 1px solid rgba(255,255,255,0.15);
+    color: rgba(255,255,255,0.85);
+    font-size: 12.5px;
+    z-index: 999;
+    pointer-events: none;
+  }
   #rdm-map .leaflet-tile-pane {
     transition: filter 0.75s ease;
   }
@@ -912,6 +948,7 @@ const styles = `
     /* Dropdown stays below search */
     #rdm-dropdown { border-radius: 12px; }
 
+
     /* Last-detected — below search bar, same left edge */
     #rdm-last-detected {
       top: 102px;           /* 62px (watermark top) + 32px (watermark height) + 8px gap */
@@ -1033,6 +1070,42 @@ const styles = `
     0%   { transform: scale(0.5); opacity: 0.9; }
     100% { transform: scale(2.2); opacity: 0; }
   }
+  #rdm-quicknav {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  background: rgba(20, 20, 30, 0.96);
+  backdrop-filter: blur(16px);
+  border-radius: 22px;
+  padding: 12px 16px 14px;
+  box-shadow: 0 8px 25px rgba(0,0,0,0.5);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  z-index: 1001;
+}
+.rdm-quicknav-heading {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.5);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 8px 0 6px;
+}
+.rdm-quicknav-heading:first-child { margin-top: 0; }
+.rdm-quicknav-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.rdm-quicknav-chip {
+  padding: 7px 14px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.18);
+  color: rgba(255,255,255,0.85);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
+}
+.rdm-quicknav-chip:hover { background: rgba(168,85,247,0.22); border-color: rgba(168,85,247,0.6); color: #fff; }
+.theme-light #rdm-quicknav { background: rgba(18,18,28,0.96); border: 1px solid rgba(255,255,255,0.1); }
 `;
 
 // ─── Sun / Moon icons ──────────────────────────────────────────────────────────
@@ -1086,11 +1159,13 @@ function LegendTrack() {
 }
 
 // ─── Search bar ───────────────────────────────────────────────────────────────
-function SearchBar({ onSelect }) {
-  const [query,   setQuery]   = useState("");
+function SearchBar({ onSelect, onQuickNav }) {
+  const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [focused, setFocused] = useState(false);
   const timerRef = useRef(null);
+
+  const showQuickNav = focused && query.length === 0;
 
   const search = useCallback(async (q) => {
     if (q.length < 3) { setResults([]); return; }
@@ -1113,10 +1188,14 @@ function SearchBar({ onSelect }) {
   const handleChange = (e) => {
     const val = e.target.value;
     setQuery(val);
+    if (val.length === 0) setResults([]);
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => search(val), 400);
   };
-
+  const handleQuickPick = (target) => {
+    onQuickNav(target);
+    setFocused(false);
+  };
   const handlePick = (r) => {
     onSelect(r.lat, r.lon, r.label.split(",")[0]);
     setQuery(r.label.split(",")[0]);
@@ -1149,7 +1228,33 @@ function SearchBar({ onSelect }) {
           </div>
         )}
       </div>
-
+      {showQuickNav && (
+        <div id="rdm-quicknav">
+          <div className="rdm-quicknav-heading">Zoom in to:</div>
+          <div className="rdm-quicknav-chips">
+            {QUICK_ZOOM_TARGETS.map((t) => (
+              <div
+                key={t.label}
+                className="rdm-quicknav-chip"
+                onMouseDown={(e) => { e.preventDefault(); handleQuickPick(t); }}
+                onTouchEnd={(e) => { e.preventDefault(); handleQuickPick(t); }}
+              >
+                {t.label}
+              </div>
+            ))}
+          </div>
+          <div className="rdm-quicknav-heading">Zoom out to:</div>
+          <div className="rdm-quicknav-chips">
+            <div
+              className="rdm-quicknav-chip"
+              onMouseDown={(e) => { e.preventDefault(); handleQuickPick({ country: true, label: "India" }); }}
+              onTouchEnd={(e) => { e.preventDefault(); handleQuickPick({ country: true, label: "India" }); }}
+            >
+              India
+            </div>
+          </div>
+        </div>
+      )}
       {results.length > 0 && focused && (
         <div id="rdm-dropdown">
           {results.map((r, i) => (
@@ -1163,6 +1268,7 @@ function SearchBar({ onSelect }) {
             </div>
           ))}
         </div>
+
       )}
     </div>
   );
@@ -1391,8 +1497,21 @@ export default function RoadDefectsMap() {
   const loadViewport = useCallback(async () => {
     const map = mapRef.current;
     if (!map || isFetchingRef.current) return;
-    isFetchingRef.current = true;
 
+    const zoom = map.getZoom();
+    if (zoom < MIN_ZOOM_FOR_FETCH) {
+      setTooZoomedOut(true);
+      return; // no estimate, no polygonToCells, no fetch — instant
+    }
+
+    const estimate = estimateH3CellCount(map.getBounds(), H3_RES);
+    if (estimate > MAX_DETAIL_CELLS) {
+      setTooZoomedOut(true);
+      return; // still skip the expensive enumeration entirely
+    }
+    setTooZoomedOut(false);
+
+    isFetchingRef.current = true;
     try {
       const cells = boundsToH3Cells(map.getBounds());
       if (cells.length > MAX_DETAIL_CELLS) {
@@ -1559,10 +1678,19 @@ export default function RoadDefectsMap() {
     if (label) pin.bindTooltip(label, { direction: "top", offset: [0, -22] });
     searchPinRef.current = pin;
   }, []);
-
+  const handleQuickNav = useCallback((target) => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (target.country) {
+      map.fitBounds(INDIA_BOUNDS, { animate: true, duration: 1.2 });
+    } else {
+      map.setView([target.lat, target.lon], target.zoom, { animate: true, duration: 1.2 });
+    }
+  }, []);
   // ── Refresh ────────────────────────────────────────────────────────────────
   const [refreshing, setRefreshing] = useState(false);
-
+  const [tooZoomedOut, setTooZoomedOut] = useState(false);
+  
   const handleRefresh = useCallback(async () => {
     const map = mapRef.current;
     if (!map || refreshing) return;
@@ -1596,7 +1724,7 @@ export default function RoadDefectsMap() {
           <div id="rdm-iris-glow" style={{ position: "absolute", inset: 0 }} />
         </div>
 
-        <SearchBar onSelect={handleSearchSelect} />
+        <SearchBar onSelect={handleSearchSelect} onQuickNav={handleQuickNav} />
 
         {/* Only render last-detected when we have a real city */}
         {lastDetected && lastDetected.city && (
@@ -1647,6 +1775,10 @@ export default function RoadDefectsMap() {
             <span>100%</span>
           </div>
         </div>
+
+        {tooZoomedOut && (
+          <div id="rdm-zoom-hint">Zoom in to view road defects</div>
+        )}
 
         {/* Legend */}
         <div id="rdm-legend">
