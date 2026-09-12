@@ -3,7 +3,10 @@ from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 import math
-from supabase import create_client
+import time
+import httpx
+from supabase import create_client, ClientOptions
+import httpcore
 from aliv_module import AlivRoadDefects
 import h3 as h3lib
 import os
@@ -71,6 +74,52 @@ MIN_COHERENCE = 0.1  # su,sv vector magnitude / energy — below this, the direc
 
 app = FastAPI()
 
+# ── Supabase client factory ─────────────────────────────────────────────────
+# NOTE: create_client() is called fresh at the top of every process_trip()
+# run (see below), so clients are never reused across requests. The
+# RemoteProtocolError("Server disconnected") failures seen in production
+# come from httpx negotiating HTTP/2 with Supabase's edge, then Railway's
+# proxy (or Supabase's own load balancer) silently closing an idle HTTP/2
+# stream faster than httpx's pool expects — surfacing as a hard disconnect
+# instead of a transparent reconnect the way HTTP/1.1 pooling handles it.
+# Forcing HTTP/1.1 here removes that failure mode at the source.
+_SUPABASE_CLIENT_OPTIONS = ClientOptions(
+    httpx_client=httpx.Client(http2=False, timeout=30.0),
+)
+
+
+def _make_supabase_client(url: str, key: str):
+    return create_client(url, key, options=_SUPABASE_CLIENT_OPTIONS)
+
+
+# ── Retry helper for transient network errors ───────────────────────────────
+# Belt-and-suspenders on top of disabling HTTP/2 above: catches the same
+# class of transient transport failure (dropped connection, reset, timeout)
+# on any individual Supabase call and retries a couple of times with a short
+# backoff before giving up. Wrap any query right before .execute(), e.g.:
+#   resp = _execute_with_retry(supabase.table("sessions").select("*").eq(...))
+_TRANSIENT_EXCEPTIONS = (
+    httpcore.RemoteProtocolError,
+    httpcore.ConnectError,
+    httpcore.ReadTimeout,
+    httpx.RemoteProtocolError,
+    httpx.ConnectError,
+    httpx.ReadTimeout,
+)
+
+
+def _execute_with_retry(query, attempts: int = 3, backoff_s: float = 0.5):
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return query.execute()
+        except _TRANSIENT_EXCEPTIONS as err:
+            last_err = err
+            print(f"  [supabase-retry] attempt {attempt}/{attempts} failed: {err}")
+            if attempt < attempts:
+                time.sleep(backoff_s * attempt)
+    raise last_err
+
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
 
@@ -111,11 +160,8 @@ def fetch_all_pages(
         query = supabase_client.table(table).select("*")
         for method, *args in filters:
             query = getattr(query, method)(*args)
-        batch = (
-            query
-            .order(order_col, desc=False)
-            .range(start, start + page_size - 1)
-            .execute()
+        batch = _execute_with_retry(
+            query.order(order_col, desc=False).range(start, start + page_size - 1)
         ).data
 
         if not batch:
@@ -273,20 +319,20 @@ def run_aliv(rows: list, fs: int) -> dict:
 # ── Session-flag helpers ────────────────────────────────────────────────────
 
 def _get_session_flags(supabase_source, session_id: str) -> dict:
-    resp = (
+    resp = _execute_with_retry(
         supabase_source.table("sessions")
         .select("aliv_processed, imu_only")
         .eq("session_id", session_id)
-        .execute()
     )
     return resp.data[0] if resp.data else {}
 
 def _mark_aliv_processed(supabase_source, session_id: str) -> None:
     try:
-        supabase_source.table("sessions") \
-            .update({"aliv_processed": True}) \
-            .eq("session_id", session_id) \
-            .execute()
+        _execute_with_retry(
+            supabase_source.table("sessions")
+            .update({"aliv_processed": True})
+            .eq("session_id", session_id)
+        )
     except Exception as err:
         print(f"[process_trip] aliv_processed update failed: {err}")
 
@@ -421,10 +467,11 @@ def _update_imu_only(
 
     imu_only_value = abs(mount_yaw_deg) > ANGLE_THRESHOLD_DEG
     try:
-        supabase_source.table("sessions") \
-            .update({"imu_only": imu_only_value}) \
-            .eq("session_id", session_id) \
-            .execute()
+        _execute_with_retry(
+            supabase_source.table("sessions")
+            .update({"imu_only": imu_only_value})
+            .eq("session_id", session_id)
+        )
         print(f"[process_trip] imu_only set to {imu_only_value} (offset={mount_yaw_deg:.1f}deg, threshold={ANGLE_THRESHOLD_DEG})")
     except Exception as imu_only_err:
         print(f"[process_trip] imu_only update failed: {imu_only_err}")
@@ -436,8 +483,21 @@ def _update_imu_only(
 def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str, end_time: str):
     print(f"[process_trip] session={session_id} vehicle={vehicle_id} user={user_id} {start_time} → {end_time}")
 
-    supabase_source = create_client(SOURCE_URL, SOURCE_KEY)
-    supabase_target = create_client(TARGET_URL, TARGET_KEY)
+    try:
+        _process_trip_inner(session_id, vehicle_id, user_id, start_time, end_time)
+    except Exception as err:
+        # This is a BackgroundTask — an uncaught exception here is otherwise
+        # completely invisible to the Supabase trigger (which already got
+        # its 200 OK) and easy to miss in Railway's log stream. Surface it
+        # loudly so a failed session is at least noticeable, and don't let
+        # aliv_processed get set for a run that didn't finish.
+        print(f"[process_trip] FAILED for session={session_id}: {err!r}")
+        raise
+
+
+def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_time: str, end_time: str):
+    supabase_source = _make_supabase_client(SOURCE_URL, SOURCE_KEY)
+    supabase_target = _make_supabase_client(TARGET_URL, TARGET_KEY)
 
     flags = _get_session_flags(supabase_source, session_id)
     already_processed = bool(flags.get("aliv_processed"))
@@ -497,33 +557,35 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
     print(f"[process_trip] Total distance: {total_distance_m:.2f} m")
 
     try:
-        supabase_source.table("sessions") \
-            .update({"distance": total_distance_m/1000}) \
-            .eq("session_id", session_id) \
-            .execute()
+        _execute_with_retry(
+            supabase_source.table("sessions")
+            .update({"distance": total_distance_m/1000})
+            .eq("session_id", session_id)
+        )
     except Exception as dist_err:
         print(f"[process_trip] distance update failed: {dist_err}")
 
     # ── 3c. Increment cumulative distance in user_details ──────────────────────
     try:
-        resp = (
+        resp = _execute_with_retry(
             supabase_target
             .table("user_details")
             .select("distance")
             .eq("firebaseuid", user_id)
-            .execute()
         )
         if resp.data:
             current_distance = float(resp.data[0]["distance"] or 0.0)
             new_distance = current_distance + (total_distance_m/1000)
-            supabase_target.table("user_details") \
-                .update({"distance": new_distance}) \
-                .eq("firebaseuid", user_id) \
-                .execute()
+            _execute_with_retry(
+                supabase_target.table("user_details")
+                .update({"distance": new_distance})
+                .eq("firebaseuid", user_id)
+            )
         else:
-            supabase_target.table("user_details") \
-                .insert({"firebaseuid": user_id, "distance": total_distance_m/1000}) \
-                .execute()
+            _execute_with_retry(
+                supabase_target.table("user_details")
+                .insert({"firebaseuid": user_id, "distance": total_distance_m/1000})
+            )
     except Exception as user_dist_err:
         print(f"[process_trip] user_details distance update failed: {user_dist_err}")
 
@@ -555,7 +617,9 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
         {k: v for k, v in e.items() if k not in ("vehicle_id", "user_id")}
         for e in enriched_events
     ]
-    insert_response = supabase_target.table("imu_events").insert(events_for_db).execute()
+    insert_response = _execute_with_retry(
+        supabase_target.table("imu_events").insert(events_for_db)
+    )
     inserted_events = insert_response.data
 
     # Re-attach id (renamed), user_id and vehicle_id for the hexagons step.
