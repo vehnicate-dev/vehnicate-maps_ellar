@@ -3,6 +3,9 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import * as h3 from "h3-js";
 import { createClient } from "@supabase/supabase-js";
+import "@luomus/leaflet-smooth-wheel-zoom";
+import "leaflet-doubletapdrag";
+import "leaflet-doubletapdragzoom";
 
 // ─── Supabase config ──────────────────────────────────────────────────────────
 const SUPABASE_URL = "https://mmjusghgeedycrrfdejg.supabase.co";
@@ -13,7 +16,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const H3_RES = 9;
 const CITIES = ["Chennai", "Surat", "Bangalore", "Mumbai", "Hyderabad", "Pune", "Kolkata"];
 const CITIES_LOOP = [...CITIES, CITIES[0]];
-const INDIA_BOUNDS = [[23, 68.0], [28, 97.5]]; // SW, NE corners
+const INDIA_BOUNDS = [[6.4, 68.0], [37.9, 97.5]]; // SW, NE corners
 const QUICK_ZOOM_TARGETS = [
   { label: "Chennai",   lat: 13.0827, lon: 80.2707, zoom: 12 },
   { label: "Bangalore", lat: 12.9716, lon: 77.5946, zoom: 12 },
@@ -435,7 +438,7 @@ const styles = `
     border: 1px solid rgba(255,255,255,0.15);
     color: rgba(255,255,255,0.85);
     font-size: 12.5px;
-    z-index: 999;
+    z-index: 1001;   /* was 999 — now wins the stack over #rdm-legend and #rdm-filter-panel (both 999) */
     pointer-events: none;
   }
   #rdm-map .leaflet-tile-pane {
@@ -1437,6 +1440,19 @@ export default function RoadDefectsMap() {
         center,
         zoom,
         zoomControl: false,
+
+        // Continuous zoom instead of integer-only steps
+        zoomSnap: 0.25,
+        zoomDelta: 0.25,
+
+        // Smooth trackpad/wheel zoom (replaces Leaflet's native chunky wheel zoom)
+        scrollWheelZoom: false,
+        smoothWheelZoom: true,
+        smoothSensitivity: 2,
+
+        // One-finger double-tap-and-drag zoom, Google Maps style
+        doubleTapDragZoom: "center",
+        doubleTapDragZoomOptions: { reverse: true },
       });
 
       L.control.zoom({ position: "bottomright" }).addTo(map);
