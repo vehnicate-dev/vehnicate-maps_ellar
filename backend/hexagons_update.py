@@ -4,8 +4,8 @@ from supabase import Client
 from ledger import (
     ledger_discovery_frozen,
     ledger_confirmation_liquid,
-    ledger_confirmation_unfreeze,   # NEW — see note below, may need adding to ledger.py
-    ledger_illegit_penalty,         # NEW — see note below, may need adding to ledger.py
+    ledger_confirmation_unfreeze,
+    ledger_illegit_penalty,
 )
 
 # ---------------------------------------------------------------------------
@@ -185,7 +185,8 @@ def _process_hex_incremental(
         supabase_target
         .table("hexagons")
         .select(
-            "id, h3_index, lat, lon, nd_count, user_id, trip_id, k, ellar_hex, ellar_user, "
+            "id, h3_index, lat, lon, nd_count, user_id, trip_id, k, "
+            "frozen_ellar_hex, liquid_ellar_hex, ellar_user, "
             "nd, event_id, parameters, confirmed, rd_trip_ids, confidence, legit"
         )
         .in_("h3_index", neighbor_cells)
@@ -201,18 +202,20 @@ def _process_hex_incremental(
             existing_same_hex[key] = row
 
     if existing_same_hex:
-        sample_row     = next(iter(existing_same_hex.values()))
-        old_trip_ids   = sample_row["trip_id"]        or []
-        old_user_ids   = sample_row["user_id"]        or []
-        old_k          = sample_row["k"]              or []
-        old_ellar_user = sample_row.get("ellar_user") or []
-        ell_hex        = float(sample_row.get("ellar_hex") or 0.0)
+        sample_row       = next(iter(existing_same_hex.values()))
+        old_trip_ids     = sample_row["trip_id"]        or []
+        old_user_ids     = sample_row["user_id"]        or []
+        old_k            = sample_row["k"]              or []
+        old_ellar_user   = sample_row.get("ellar_user") or []
+        frozen_ellar_hex = float(sample_row.get("frozen_ellar_hex") or 0.0)
+        liquid_ellar_hex = float(sample_row.get("liquid_ellar_hex") or 0.0)
     else:
-        old_trip_ids   = []
-        old_user_ids   = []
-        old_k          = []
-        old_ellar_user = []
-        ell_hex        = 0.0
+        old_trip_ids     = []
+        old_user_ids     = []
+        old_k            = []
+        old_ellar_user   = []
+        frozen_ellar_hex = 0.0
+        liquid_ellar_hex = 0.0
 
     trip_summary: dict[str, dict] = {}
     for i, (tid, uid, k_val) in enumerate(zip(old_trip_ids, old_user_ids, old_k)):
@@ -328,6 +331,7 @@ def _process_hex_incremental(
                     nD = len(prior_confirmers) + 1
                     confirmation_reward = reward_multiplier * (2 - math.log10(nD))
                     _bump_liquid(uid, confirmation_reward)
+                    liquid_ellar_hex += confirmation_reward
                     ledger_confirmation_liquid(
                         supabase_target, uid, confirmation_reward,
                         h3_index, row["id"], nD,
@@ -345,6 +349,11 @@ def _process_hex_incremental(
                             unfreeze_amt = disc_multiplier * (4 - 2 * math.log10(N_of_discoverer))
                             _bump_frozen(discoverer_uid, -unfreeze_amt)
                             _bump_liquid(discoverer_uid, unfreeze_amt)
+                            # Moves the amount from the hex's frozen pool to
+                            # its liquid pool — it's the same reward, just no
+                            # longer escrowed.
+                            frozen_ellar_hex -= unfreeze_amt
+                            liquid_ellar_hex += unfreeze_amt
                             ledger_confirmation_unfreeze(
                                 supabase_target, discoverer_uid, unfreeze_amt,
                                 h3_index, row["id"], N_of_discoverer,
@@ -395,7 +404,7 @@ def _process_hex_incremental(
                     discovery_reward = reward_multiplier * (4 - 2 * math.log10(N))
                 else:
                     discovery_reward = (
-                        reward_multiplier * (ell_hex / rD_running) if rD_running > 0 else 0.0
+                        reward_multiplier * (frozen_ellar_hex / rD_running) if rD_running > 0 else 0.0
                     )
 
                 new_row = {
@@ -422,7 +431,7 @@ def _process_hex_incremental(
                 rD_running += 1
 
                 _bump_frozen(uid, discovery_reward)
-                ell_hex += discovery_reward
+                frozen_ellar_hex += discovery_reward
                 if trip_idx is not None:
                     ellar_user_hex[trip_idx] += discovery_reward
 
@@ -435,7 +444,7 @@ def _process_hex_incremental(
     # what it found, before writing final balances.
     total_trips = len(hex_trip_id)
     if total_trips > 10:
-        _check_illegit_defects(
+        total_frozen_penalty = _check_illegit_defects(
             supabase_target,
             existing_same_hex,
             hex_trip_id,
@@ -443,9 +452,11 @@ def _process_hex_incremental(
             h3_index,
             trip_index=total_trips - 11,
             frozen_delta=frozen_delta,
-            liquid_delta=liquid_delta,
             reward_multiplier=reward_multiplier,
         )
+        # Any frozen reward clawed back from a discoverer must also come
+        # back out of this hexagon's frozen pool.
+        frozen_ellar_hex -= total_frozen_penalty
 
     # --- Apply accumulated balance deltas ----------------------------------
     for uid, amount in frozen_delta.items():
@@ -463,19 +474,20 @@ def _process_hex_incremental(
         if row_id is None:
             continue
         supabase_target.table("hexagons").update({
-            "ellar_hex":  ell_hex,
-            "ellar_user": ellar_user_hex,
-            "confidence": confidence_map.get(key, 0.0),
-            "user_id":    hex_user_id,
-            "trip_id":    hex_trip_id,
-            "k":          hex_k,
+            "frozen_ellar_hex": frozen_ellar_hex,
+            "liquid_ellar_hex": liquid_ellar_hex,
+            "ellar_user":       ellar_user_hex,
+            "confidence":       confidence_map.get(key, 0.0),
+            "user_id":          hex_user_id,
+            "trip_id":          hex_trip_id,
+            "k":                hex_k,
         }).eq("id", row_id).execute()
 
     print(
         f"[hexagons] h3={h3_index} | trips={len(sorted_trips)} | "
         f"new_events={len(new_events)} | discoveries={discovery_count} | "
         f"confirmations={confirmation_count} | rD={rD_running} | "
-        f"ellar_hex={ell_hex:.4f}"
+        f"frozen_ellar_hex={frozen_ellar_hex:.4f} | liquid_ellar_hex={liquid_ellar_hex:.4f}"
     )
 
 
@@ -487,20 +499,20 @@ def _check_illegit_defects(
     h3_index: str,
     trip_index: int,
     frozen_delta: dict,
-    liquid_delta: dict,
     reward_multiplier: float,
-) -> None:
+) -> float:
     """
     10 trips after a given trip discovered road defects in this hex, check
     whether each of those defects earned legitimacy (confirmed==True, by
     discoverer or stranger, or confidence >= 30). Anything that didn't is
-    discarded, and its discoverer is penalized:
-      - the original frozen discovery reward for that RD is removed entirely
-      - an additional 1% of that reward is docked from the discoverer's
-        liquid balance
+    discarded, and its discoverer is penalized: the original frozen discovery
+    reward for that RD is removed entirely (no liquid-side penalty).
+
+    Returns the total frozen amount clawed back across all discarded rDs, so
+    the caller can also subtract it from the hexagon's running frozen pool.
     """
     if trip_index < 0 or trip_index >= len(hex_trip_id):
-        return
+        return 0.0
 
     examined_trip_id = hex_trip_id[trip_index]
     examined_user     = hex_user_id[trip_index]
@@ -513,13 +525,14 @@ def _check_illegit_defects(
             rds_in_trip.append((key, row))
 
     if not rds_in_trip:
-        return
+        return 0.0
 
     disc_multiplier = _get_session_multiplier(
         supabase_target, examined_trip_id, default=reward_multiplier,
     )
 
     discard = []
+    total_frozen_penalty = 0.0
     for key, row in rds_in_trip:
         confirmed  = bool(row.get("confirmed", False))
         confidence = float(row.get("confidence") or 0.0)
@@ -528,13 +541,12 @@ def _check_illegit_defects(
             continue  # legit enough — no action
 
         penalty_frozen = disc_multiplier * (4 - 2 * math.log10(N_of_discoverer))
-        penalty_liquid = 0.01 * penalty_frozen
 
         frozen_delta[examined_user] = frozen_delta.get(examined_user, 0.0) - penalty_frozen
-        liquid_delta[examined_user] = liquid_delta.get(examined_user, 0.0) - penalty_liquid
+        total_frozen_penalty += penalty_frozen
 
         ledger_illegit_penalty(
-            supabase_target, examined_user, penalty_frozen, penalty_liquid,
+            supabase_target, examined_user, penalty_frozen,
             h3_index, row.get("id"), N_of_discoverer,
         )
 
@@ -542,7 +554,7 @@ def _check_illegit_defects(
         print(
             f"  [illegit] trip={examined_trip_id} n={N_of_discoverer} "
             f"rd_id={row.get('id')} frozen_penalty={penalty_frozen:.4f} "
-            f"liquid_penalty={penalty_liquid:.4f} user={examined_user}"
+            f"user={examined_user}"
         )
 
     for key, row_id in discard:
@@ -552,3 +564,5 @@ def _check_illegit_defects(
             except Exception as del_err:
                 print(f"  [illegit] failed to discard rd_id={row_id}: {del_err}")
         existing_same_hex.pop(key, None)
+
+    return total_frozen_penalty

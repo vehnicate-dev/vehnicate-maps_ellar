@@ -136,7 +136,6 @@ def ledger_illegit_penalty(
     supabase_target: Client,
     from_user_id: str,
     penalty_frozen: float,
-    penalty_liquid: float,
     h3_index: str,
     hex_row_id,
     n: int,               # generation index of the discoverer's own trip
@@ -144,16 +143,11 @@ def ledger_illegit_penalty(
     """
     Penalizes a discoverer whose road defect failed the 5-trip legitimacy
     check (never confirmed, confidence stayed below 30): the original frozen
-    discovery reward for that defect is removed entirely, plus an additional
-    1% of that reward is docked from liquid. Writes two rows so the ledger
-    shows the frozen removal and the liquid penalty separately.
+    discovery reward for that defect is removed entirely. There is no
+    liquid-side penalty — only the frozen reward is clawed back.
     """
     comment = (
         f"Illegitimate road defect penalty | hex={h3_index} | "
         f"hexagons.roaddefect_id={hex_row_id} | n={n}"
     )
     _ledger_entry(supabase_target, from_user_id, -penalty_frozen, "frozen", comment)
-    _ledger_entry(
-        supabase_target, from_user_id, -penalty_liquid, "liquid",
-        comment + " (1% liquid penalty)",
-    )

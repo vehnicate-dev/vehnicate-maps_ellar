@@ -13,7 +13,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const H3_RES = 9;
 const CITIES = ["Chennai", "Surat", "Bangalore", "Mumbai", "Hyderabad", "Pune", "Kolkata"];
 const CITIES_LOOP = [...CITIES, CITIES[0]];
-const INDIA_BOUNDS = [[6.5, 68.0], [37.6, 97.5]]; // SW, NE corners
+const INDIA_BOUNDS = [[23, 68.0], [28, 97.5]]; // SW, NE corners
 const QUICK_ZOOM_TARGETS = [
   { label: "Chennai",   lat: 13.0827, lon: 80.2707, zoom: 12 },
   { label: "Bangalore", lat: 12.9716, lon: 77.5946, zoom: 12 },
@@ -1480,7 +1480,7 @@ export default function RoadDefectsMap() {
       if (!entry) return;
       const { marker, row, param } = entry;
       const frames = imageCacheRef.current[eid] || [];
-      const html = await buildImagePopupHTML(row, param, frames, next);
+      const html = await buildImagePopupHTML(row, param, frames, next, { eid });
       marker.setPopupContent(html); // updates the already-open popup in place
     };
     return () => { delete window.vehnicateRotateFrame; };
