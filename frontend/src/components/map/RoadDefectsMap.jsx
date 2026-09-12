@@ -21,6 +21,17 @@ const QUICK_ZOOM_TARGETS = [
   { label: "Chennai",   lat: 13.0827, lon: 80.2707, zoom: 12 },
   { label: "Bangalore", lat: 12.9716, lon: 77.5946, zoom: 12 },
 ];
+const MERCHANT_LOCATIONS = [
+  {
+    lat: 13.0360349,
+    lon: 80.1313928,
+    name: "Muthaaramman mini supermarket",
+    directionsUrl: "https://maps.app.goo.gl/s25VMxMpKa3MAF5z7",
+    // Host the storefront photo (Supabase storage bucket, or /public folder)
+    // and drop the URL here. Using a Supabase public URL as an example:
+    photoUrl: "https://mmjusghgeedycrrfdejg.supabase.co/storage/v1/object/public/partner_store_images/muthaaramman_store.jpg",
+  },
+];
 const MIN_ZOOM_FOR_FETCH = 12;
 const MAX_DETAIL_CELLS = 40000; // safety valve — skip fetch if viewport would need more cells than this
 
@@ -409,7 +420,54 @@ function buildHoverHTML(row, param, lastDetectedStr) {
       </div>
     </div>`;
 }
+function buildMerchantFlagIcon() {
+  return L.divIcon({
+    className: "",
+    html: `
+      <svg width="26" height="32" viewBox="0 0 26 32" style="filter:drop-shadow(0 2px 6px rgba(168,85,247,0.55));">
+        <line x1="4" y1="2" x2="4" y2="30" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round"/>
+        <path d="M4 3 L23 8.5 L4 15 Z" fill="url(#rdmFlagGrad)" stroke="#ec4899" stroke-width="0.8"/>
+        <defs>
+          <linearGradient id="rdmFlagGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#a855f7"/>
+            <stop offset="100%" stop-color="#ec4899"/>
+          </linearGradient>
+        </defs>
+      </svg>`,
+    iconSize: [26, 32],
+    iconAnchor: [4, 30], // pins the base of the pole to the exact coordinate
+  });
+}
 
+function buildMerchantPopupHTML(m) {
+  return `
+    <div style="font-family:monospace;max-width:280px;">
+      ${m.photoUrl ? `
+      <div style="margin:-14px -14px 10px -14px;">
+        <img src="${m.photoUrl}" alt="${m.name}" style="width:100%;height:140px;
+          object-fit:cover;border-radius:10px 10px 0 0;display:block;" />
+      </div>` : ``}
+      <div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:2px;">
+        ${m.name}
+      </div>
+      <div style="font-size:10px;font-weight:600;margin-bottom:9px;
+        background:linear-gradient(135deg,#a855f7,#ec4899);
+        -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+        background-clip:text;">
+        vehnicate merchant network
+      </div>
+      <div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:10px;">
+        Ellars redeemable here
+      </div>
+      <div style="font-size:11px;color:#ccc;line-height:1.5;">
+        For directions:
+        <a href="${m.directionsUrl}" target="_blank" rel="noopener noreferrer"
+          style="color:#38bdf8;text-decoration:underline;word-break:break-all;">
+          ${m.directionsUrl}
+        </a>
+      </div>
+    </div>`;
+}
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=Ledger&display=swap');
@@ -1461,6 +1519,17 @@ export default function RoadDefectsMap() {
         "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=cb1_2gzd_1_d14af46dbfbc5d8f214caf08",
         { attribution: "© OpenStreetMap contributors © CARTO", subdomains: "abcd", maxZoom: 20 }
       ).addTo(map);
+      
+      MERCHANT_LOCATIONS.forEach((m) => {
+        const html = buildMerchantPopupHTML(m);
+        const marker = L.marker([m.lat, m.lon], {
+          icon: buildMerchantFlagIcon(),
+          zIndexOffset: 1500, // sits above ordinary defect circle markers
+        });
+        marker.bindTooltip(html, { direction: "top", offset: [0, -30], opacity: 1 });
+        marker.bindPopup(html, { maxWidth: 300 });
+        marker.addTo(map);
+      });
 
       mapRef.current = map;
 
