@@ -6,23 +6,26 @@ Map-matches a trip's raw GPS trace onto the OSM road network so that:
     `direction_label`, so hexagons_update.py's 15m proximity dedup can tell
     two nearby detections on opposite carriageways/lanes apart.
 
-Requires: pip install leuvenmapmatching osmread --break-system-packages
+Requires: pip install leuvenmapmatching osmium --break-system-packages
 An OSM extract (.osm.pbf) covering the operating area (Chennai) is parsed
 once at process startup via init_map_matcher() — never per-request, since
-walking the whole extract into an InMemMap is expensive and osmread's pure-
-Python PBF parser is not fast.
+walking the whole extract into an InMemMap is expensive.
 
 `InMemMap` has no built-in OSM loader — it has to be built manually from
-parsed Way/Node entities (this is the documented pattern from the
-leuvenmapmatching project itself, not something bespoke). `matcher.match()`
-returns one (from_node, to_node) directed-edge label pair per matched
-observation — that pair IS the direction of travel along that edge, so it's
-used directly as direction_label rather than collapsing it to a
-forward/backward string.
+parsed way/node data (this is the documented pattern from the
+leuvenmapmatching project itself, not something bespoke). `pyosmium`
+(imported as `osmium`) is used to walk the .pbf file — it ships prebuilt
+wheels for Windows/Linux/macOS, unlike `osmread`, which pins a 2016-era
+protobuf that no longer builds on modern Python/setuptools.
+
+`matcher.match()` returns one (from_node, to_node) directed-edge label pair
+per matched observation — that pair IS the direction of travel along that
+edge, so it's used directly as direction_label rather than collapsing it to
+a forward/backward string.
 """
 from __future__ import annotations
 
-import osmread
+import osmium as osm
 import pandas as pd
 from leuvenmapmatching.map.inmem import InMemMap
 from leuvenmapmatching.matcher.distance import DistanceMatcher
@@ -37,24 +40,42 @@ OBS_NOISE_M = 10
 _ONEWAY_VALUES = {"yes", "1", "true"}
 
 
+class _RoadGraphHandler(osm.SimpleHandler):
+    """Walks the .pbf once, adding every node and every highway-tagged way's
+    edges to map_con. Doesn't need pyosmium's locations=True node-location
+    cache — add_edge only needs numeric node ids; InMemMap fills in each
+    node's coordinate separately via add_node, whichever order they arrive
+    in, so skipping the location index keeps this pass faster."""
+
+    def __init__(self, map_con: InMemMap):
+        osm.SimpleHandler.__init__(self)
+        self.map_con = map_con
+        self.way_count = 0
+        self.node_count = 0
+
+    def node(self, n):
+        if n.location.valid():
+            self.map_con.add_node(n.id, (n.location.lat, n.location.lon))
+            self.node_count += 1
+
+    def way(self, w):
+        if "highway" not in w.tags:
+            return
+        oneway = w.tags.get("oneway", "").lower() in _ONEWAY_VALUES
+        node_ids = [n.ref for n in w.nodes]
+        for a, b in zip(node_ids, node_ids[1:]):
+            self.map_con.add_edge(a, b)
+            if not oneway:
+                self.map_con.add_edge(b, a)
+        self.way_count += 1
+
+
 def _build_map_from_pbf(osm_pbf_path: str) -> InMemMap:
     map_con = InMemMap("chennai", use_latlon=True, use_rtree=True, index_edges=True)
-    way_count = node_count = 0
-
-    for entity in osmread.parse_file(osm_pbf_path):
-        if isinstance(entity, osmread.Way) and "highway" in entity.tags:
-            oneway = entity.tags.get("oneway", "").lower() in _ONEWAY_VALUES
-            for node_a, node_b in zip(entity.nodes, entity.nodes[1:]):
-                map_con.add_edge(node_a, node_b)
-                if not oneway:
-                    map_con.add_edge(node_b, node_a)
-            way_count += 1
-        elif isinstance(entity, osmread.Node):
-            map_con.add_node(entity.id, (entity.lat, entity.lon))
-            node_count += 1
-
+    handler = _RoadGraphHandler(map_con)
+    handler.apply_file(osm_pbf_path)
     map_con.purge()  # drop edges referencing nodes that were never added
-    print(f"[map_matching] built graph from {way_count} ways, {node_count} nodes")
+    print(f"[map_matching] built graph from {handler.way_count} ways, {handler.node_count} nodes")
     return map_con
 
 
