@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np
 import math
 import time
+import queue
+import threading
 import httpx
 from supabase import create_client, ClientOptions
 import httpcore
@@ -66,9 +68,11 @@ SOURCE_KEY = os.environ.get("SOURCE_KEY")
 TARGET_URL = os.environ.get("TARGET_URL")
 TARGET_KEY = os.environ.get("TARGET_KEY")
 
-# Chennai OSM extract used for map-matching. Loaded once at startup.
+# Chennai OSM extract used for map-matching. Loaded once at startup;
+# downloaded automatically to OSM_PBF_PATH if not already present (Railway's
+# filesystem is ephemeral, so this runs on every fresh deploy/restart).
 OSM_PBF_PATH = os.environ.get("OSM_PBF_PATH", "chennai.osm.pbf")
-OSM_PBF_URL = os.environ.get("OSM_PBF_URL")
+OSM_PBF_URL = os.environ.get("OSM_PBF_URL")  # direct .osm.pbf download link
 
 # Must match AlivRoadDefects(fs=…) below
 #ALIV_FS          = 40 # previously 80
@@ -83,6 +87,38 @@ GRAVITY_LOWPASS_WINDOW_S  = 1.5   # rolling window used to separate gravity from
 MIN_COHERENCE = 0.1  # su,sv vector magnitude / energy — below this, the direction estimate is noise-dominated
 
 app = FastAPI()
+
+
+# ── Single-worker trip queue ─────────────────────────────────────────────────
+# FastAPI's BackgroundTasks runs sync callables via a thread pool, so several
+# webhook-triggered trips arriving close together would otherwise run
+# CONCURRENTLY, not one after another. That's unsafe here: hexagons_update.py
+# reads a hex's current rows, computes changes in Python, then writes them
+# back across several separate calls — two trips landing in the same/nearby
+# H3 cell at once can race and lose or duplicate updates. A single worker
+# thread pulling from a FIFO queue guarantees the same "one trip fully
+# finishes before the next starts" property that /replay_all_sessions already
+# has for the bulk-replay case, but for live webhook traffic too.
+_trip_queue: "queue.Queue[tuple]" = queue.Queue()
+
+
+def _trip_worker() -> None:
+    while True:
+        session_id, vehicle_id, user_id, start_time, end_time = _trip_queue.get()
+        try:
+            process_trip(session_id, vehicle_id, user_id, start_time, end_time)
+        except Exception as err:
+            # process_trip() already logs and re-raises internally; catch here
+            # too so one bad trip can never kill the worker thread and silently
+            # stop all future processing.
+            print(f"[trip_worker] session={session_id} raised: {err!r}")
+        finally:
+            _trip_queue.task_done()
+
+
+@app.on_event("startup")
+def _start_trip_worker() -> None:
+    threading.Thread(target=_trip_worker, daemon=True).start()
 
 
 @app.on_event("startup")
@@ -718,16 +754,15 @@ async def add_security_headers(request, call_next):
 # ── Webhook endpoint ───────────────────────────────────────────────────────────
 
 @app.post("/Aliv_for_MVP1")
-def Aliv_for_MVP1(payload: WebhookPayload, background_tasks: BackgroundTasks):
+def Aliv_for_MVP1(payload: WebhookPayload):
     session = payload.record
-    background_tasks.add_task(
-        process_trip,
+    _trip_queue.put((
         session.session_id,
         session.vehicle_id,
         session.user_id,
         session.start_time,
         session.end_time,
-    )
+    ))
     return {"status": "received"}
 
 
