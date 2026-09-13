@@ -6,18 +6,23 @@ Map-matches a trip's raw GPS trace onto the OSM road network so that:
     `direction_label`, so hexagons_update.py's 15m proximity dedup can tell
     two nearby detections on opposite carriageways/lanes apart.
 
-Requires: pip install leuvenmapmatching --break-system-packages
-An OSM extract (.osm.pbf) covering the operating area (Chennai) is loaded
+Requires: pip install leuvenmapmatching osmread --break-system-packages
+An OSM extract (.osm.pbf) covering the operating area (Chennai) is parsed
 once at process startup via init_map_matcher() — never per-request, since
-parsing the extract into an InMemMap is expensive.
+walking the whole extract into an InMemMap is expensive and osmread's pure-
+Python PBF parser is not fast.
 
-NOTE: the exact attribute/return shape of `matcher.match()` states and
-`InMemMap` node lookups vary slightly across leuvenmapmatching releases —
-verify `node1`/`node2`/`node_coordinates` below against the version pinned
-in requirements.txt before deploying.
+`InMemMap` has no built-in OSM loader — it has to be built manually from
+parsed Way/Node entities (this is the documented pattern from the
+leuvenmapmatching project itself, not something bespoke). `matcher.match()`
+returns one (from_node, to_node) directed-edge label pair per matched
+observation — that pair IS the direction of travel along that edge, so it's
+used directly as direction_label rather than collapsing it to a
+forward/backward string.
 """
 from __future__ import annotations
 
+import osmread
 import pandas as pd
 from leuvenmapmatching.map.inmem import InMemMap
 from leuvenmapmatching.matcher.distance import DistanceMatcher
@@ -29,11 +34,34 @@ _MAP_CON: InMemMap | None = None
 MAX_DIST_M = 50
 OBS_NOISE_M = 10
 
+_ONEWAY_VALUES = {"yes", "1", "true"}
+
+
+def _build_map_from_pbf(osm_pbf_path: str) -> InMemMap:
+    map_con = InMemMap("chennai", use_latlon=True, use_rtree=True, index_edges=True)
+    way_count = node_count = 0
+
+    for entity in osmread.parse_file(osm_pbf_path):
+        if isinstance(entity, osmread.Way) and "highway" in entity.tags:
+            oneway = entity.tags.get("oneway", "").lower() in _ONEWAY_VALUES
+            for node_a, node_b in zip(entity.nodes, entity.nodes[1:]):
+                map_con.add_edge(node_a, node_b)
+                if not oneway:
+                    map_con.add_edge(node_b, node_a)
+            way_count += 1
+        elif isinstance(entity, osmread.Node):
+            map_con.add_node(entity.id, (entity.lat, entity.lon))
+            node_count += 1
+
+    map_con.purge()  # drop edges referencing nodes that were never added
+    print(f"[map_matching] built graph from {way_count} ways, {node_count} nodes")
+    return map_con
+
 
 def init_map_matcher(osm_pbf_path: str) -> None:
     """Call once at FastAPI startup (see main.py's startup event)."""
     global _MAP_CON
-    _MAP_CON = InMemMap.from_pbf(osm_pbf_path, use_latlon=True)
+    _MAP_CON = _build_map_from_pbf(osm_pbf_path)
     print(f"[map_matching] loaded OSM extract from {osm_pbf_path}")
 
 
