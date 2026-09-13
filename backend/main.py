@@ -618,6 +618,7 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     matched_records = gps_df[[
         "timestamp_ms", "matched_lat", "matched_lon", "osm_way_id", "direction_label",
     ]].to_dict(orient="records")
+    matched_records = [sanitize_for_json(r) for r in matched_records]
     for r in matched_records:
         r["session_id"] = session_id
     try:

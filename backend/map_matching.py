@@ -41,22 +41,21 @@ OBS_NOISE_M = 10
 
 _ONEWAY_VALUES = {"yes", "1", "true"}
 
+_DRIVABLE_HIGHWAY_VALUES = {
+    "motorway", "trunk", "primary", "secondary", "tertiary", "unclassified",
+    "residential", "living_street", "service",
+    "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link",
+}
 
 class _WayCollector(osm.SimpleHandler):
-    """Pass 1: which node ids are actually part of a highway way, and the
-    directed edge list to build. Skips every non-road node (buildings, POIs,
-    etc.) up front — for a large extract those vastly outnumber road nodes,
-    and were the source of the OOM crash when every node got added
-    unconditionally."""
-
     def __init__(self):
         osm.SimpleHandler.__init__(self)
         self.way_node_ids: set = set()
-        self.edges: list = []  # (node_a, node_b, oneway)
+        self.edges: list = []
         self.way_count = 0
 
     def way(self, w):
-        if "highway" not in w.tags:
+        if w.tags.get("highway") not in _DRIVABLE_HIGHWAY_VALUES:
             return
         oneway = w.tags.get("oneway", "").lower() in _ONEWAY_VALUES
         node_ids = [n.ref for n in w.nodes]
