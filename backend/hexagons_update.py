@@ -34,12 +34,38 @@ def _weighted_centroid(
 PROXIMITY_THRESHOLD_M = 15  # metres
 
 
-def _find_nearby_key(coord: list, existing: dict) -> str | None:
+def _find_nearby_key(
+    coord: list,
+    existing: dict,
+    direction_label: str | None = None,
+    osm_way_id: str | None = None,
+) -> str | None:
+    """
+    A candidate row within PROXIMITY_THRESHOLD_M is only treated as the SAME
+    physical road defect if direction/way information agrees. This is what
+    stops two detections <15m apart on opposite carriageways (different
+    osm_way_id) or opposite lanes of an undivided street (same way, opposite
+    direction_label) from being merged into one defect.
+
+    If either side is missing direction/way info (an unmatched GPS fix), the
+    gate is skipped for that field and the check falls back to
+    distance-only — same behavior as before map-matching existed.
+    """
     lat, lon = float(coord[0]), float(coord[1])
     for key, row in existing.items():
         elat, elon = float(row["lat"]), float(row["lon"])
-        if _haversine_m(lat, lon, elat, elon) < PROXIMITY_THRESHOLD_M:
-            return key
+        if _haversine_m(lat, lon, elat, elon) >= PROXIMITY_THRESHOLD_M:
+            continue
+
+        row_way = row.get("osm_way_id")
+        if osm_way_id and row_way and row_way != osm_way_id:
+            continue  # different OSM way entirely (e.g. divided carriageways)
+
+        row_dir = row.get("direction_label")
+        if direction_label and row_dir and row_dir != direction_label:
+            continue  # same way, opposite direction of travel
+
+        return key
     return None
 
 
@@ -187,6 +213,7 @@ def _process_hex_incremental(
         .select(
             "id, h3_index, lat, lon, nd_count, user_id, trip_id, k, "
             "frozen_ellar_hex, liquid_ellar_hex, ellar_user, "
+            "direction_label, osm_way_id, "
             "nd, event_id, parameters, confirmed, rd_trip_ids, confidence, legit"
         )
         .in_("h3_index", neighbor_cells)
@@ -276,6 +303,8 @@ def _process_hex_incremental(
         uid  = event["user_id"]
         eid  = event["id"]
         tid  = event["session_id"]
+        event_direction = event.get("direction_label")
+        event_way_id    = event.get("osm_way_id")
 
         if eid in seen_event_ids:
             continue
@@ -287,7 +316,7 @@ def _process_hex_incremental(
 
         for coord in path:
             lat, lon   = float(coord[0]), float(coord[1])
-            nearby_key = _find_nearby_key(coord, existing)
+            nearby_key = _find_nearby_key(coord, existing, event_direction, event_way_id)
 
             if nearby_key is not None:
                 # --------------------------------------------------------
@@ -421,6 +450,8 @@ def _process_hex_incremental(
                     "parameters":  [event["parameter"]],
                     "confirmed":   False,
                     "legit":       False,
+                    "direction_label": event_direction,
+                    "osm_way_id":      event_way_id,
                 }
                 insert_resp = supabase_target.table("hexagons").insert(new_row).execute()
 

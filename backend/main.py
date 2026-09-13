@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from hexagons_update import update_hexagons
 from zoneinfo import ZoneInfo
 from distance import compute_total_distance
+from map_matching import init_map_matcher, map_match_trip
 
 IST = ZoneInfo("Asia/Kolkata")
 """
@@ -22,8 +23,9 @@ via ngrok carrying session_id, vehicle_id, start_time & end_time.
 |
 ↓
 process_trip() fetches IMU rows from imu_data and GPS rows from gps_data (both keyed by
-session_id), merges them on nearest timestamp_ms, then feeds the combined rows into Aliv
-for road defect detection.
+session_id), map-matches the GPS trace onto OSM (map_matching.map_match_trip), persists
+the matched trace to matched_gps_data, merges IMU+matched-GPS on nearest timestamp_ms,
+then feeds the combined rows into Aliv for road defect detection.
 
 Column mapping summary
 ──────────────────────
@@ -31,7 +33,11 @@ imu_data  : accel_x/y/z  → renamed to accelx/y/z    (Aliv key)
             gyro_x/y/z   → renamed to gyrox/y/z      (Aliv key)
             user_accel_x → renamed to useraccelx      (Aliv key, no underscore!)
             created_at   → mapped to 'timestamp'      (Aliv time key)
-gps_data  : latitude, longitude, speed               (Aliv uses these directly)
+gps_data  : latitude, longitude, speed               (Aliv uses these directly — RAW,
+            unaffected by map-matching; Aliv's own "has the vehicle moved" gate only
+            needs a rough fix, not a road-snapped one)
+matched_gps_data : matched_lat, matched_lon, osm_way_id, direction_label — used by
+            enrich_events() for reported defect locations/direction, NOT fed into Aliv.
 
 Aliv time output
 ────────────────
@@ -60,6 +66,9 @@ SOURCE_KEY = os.environ.get("SOURCE_KEY")
 TARGET_URL = os.environ.get("TARGET_URL")
 TARGET_KEY = os.environ.get("TARGET_KEY")
 
+# Chennai OSM extract used for map-matching. Loaded once at startup.
+OSM_PBF_PATH = os.environ.get("OSM_PBF_PATH", "chennai.osm.pbf")
+
 # Must match AlivRoadDefects(fs=…) below
 #ALIV_FS          = 40 # previously 80
 #ALIV_TRIM        = 50                              # samples trimmed from each end
@@ -73,6 +82,20 @@ GRAVITY_LOWPASS_WINDOW_S  = 1.5   # rolling window used to separate gravity from
 MIN_COHERENCE = 0.1  # su,sv vector magnitude / energy — below this, the direction estimate is noise-dominated
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+def _load_map_matcher() -> None:
+    # Parsing the OSM extract into an InMemMap is expensive — do it once per
+    # process, never inside process_trip().
+    try:
+        init_map_matcher(OSM_PBF_PATH)
+    except Exception as err:
+        # Don't crash the whole service if the extract is missing/misconfigured
+        # in a given environment — map_match_trip() will raise per-request
+        # instead, which surfaces clearly in that trip's background-task log.
+        print(f"[startup] map matcher failed to initialize: {err!r}")
+
 
 # ── Supabase client factory ─────────────────────────────────────────────────
 # NOTE: create_client() is called fresh at the top of every process_trip()
@@ -187,12 +210,16 @@ def sanitize_for_json(obj):
     return obj
 
 def merge_gps_into_imu(imu_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFrame:
-    """Attach the nearest GPS fix to every IMU row via an asof join on timestamp_ms."""
+    """Attach the nearest GPS fix (raw + map-matched) to every IMU row via an
+    asof join on timestamp_ms."""
     imu_df = imu_df.sort_values("timestamp_ms").reset_index(drop=True)
     gps_df = gps_df.sort_values("timestamp_ms").reset_index(drop=True)
     return pd.merge_asof(
         imu_df,
-        gps_df[["timestamp_ms", "latitude", "longitude", "speed", "bearing"]],
+        gps_df[[
+            "timestamp_ms", "latitude", "longitude", "speed", "bearing",
+            "matched_lat", "matched_lon", "osm_way_id", "direction_label",
+        ]],
         on="timestamp_ms",
         direction="nearest",
     )
@@ -211,6 +238,10 @@ def build_aliv_input(df: pd.DataFrame) -> list[dict]:
         lat    → 'latitude' | 'lat'                       ← already named correctly
         lon    → 'longitude' | 'lon'                      ← already named correctly
         speed  → 'speed'                                   ← already named correctly
+
+    NOTE: intentionally still feeds RAW latitude/longitude to Aliv, not the
+    map-matched columns — Aliv only uses these for its coarse "has the
+    vehicle moved from the start" gate, not for anything reported downstream.
     """
     df = df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp_ms"], unit="ms", utc=True)
@@ -248,11 +279,18 @@ def enrich_events(
     aliv_trim_offset
 ) -> list:
     """
-    Map Aliv's relative-time events back to absolute UTC timestamps and GPS coordinates
-    using the merged IMU+GPS DataFrame.
+    Map Aliv's relative-time events back to absolute UTC timestamps and
+    map-matched GPS coordinates using the merged IMU+GPS DataFrame.
 
     Matching strategy: convert Aliv's start/end ms to absolute timestamps, then find
     the nearest rows in the raw df by created_at (UTC).
+
+    `path` is built from matched_lat/matched_lon (road-snapped), not raw
+    latitude/longitude — this is what ultimately lands in imu_events.path and
+    then hexagons.lat/lon. `direction_label` is the mode across the event's
+    window: a speedbreaker event is ~1-2s long, so direction won't flip
+    mid-event, and taking the mode guards against a stray unmatched point
+    near a junction skewing a single-point read.
     """
     enriched = []
 
@@ -277,7 +315,7 @@ def enrich_events(
         end_time   = pd.to_datetime(subset["timestamp_ms"].iloc[-1], unit="ms", utc=True)
 
         lat_lon = (
-            subset[["latitude", "longitude"]]
+            subset[["matched_lat", "matched_lon"]]
             .dropna()
             .drop_duplicates()
             .values
@@ -289,6 +327,12 @@ def enrich_events(
         first_lat, first_lon = lat_lon[0][0], lat_lon[0][1]
         h3_index = h3lib.latlng_to_cell(first_lat, first_lon, 9)
 
+        dir_counts = subset["direction_label"].dropna().value_counts()
+        event_direction = dir_counts.idxmax() if not dir_counts.empty else None
+
+        way_counts = subset["osm_way_id"].dropna().value_counts()
+        event_way_id = way_counts.idxmax() if not way_counts.empty else None
+
         enriched.append({
             "user_id":    user_id,
             "vehicle_id": vehicle_id,
@@ -297,7 +341,9 @@ def enrich_events(
             "start_time": pd.to_datetime(start_time, utc=True).astimezone(IST).isoformat(),
             "end_time":   pd.to_datetime(end_time, utc=True).astimezone(IST).isoformat(),
             "parameter":  event["parameter"],
-            "path":       lat_lon
+            "path":       lat_lon,
+            "direction_label": event_direction,
+            "osm_way_id": event_way_id,
         })
 
     return enriched
@@ -528,9 +574,24 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
         print("[process_trip] No GPS data, skipping.")
         return
 
-    # ── 3. Merge IMU + GPS ─────────────────────────────────────────────────────
-    imu_df = pd.DataFrame(imu_rows)
+    # ── 2a. Map-match GPS onto OSM and persist the matched trajectory ──────────
     gps_df = pd.DataFrame(gps_rows)
+    gps_df = map_match_trip(gps_df)
+
+    matched_records = gps_df[[
+        "timestamp_ms", "matched_lat", "matched_lon", "osm_way_id", "direction_label",
+    ]].to_dict(orient="records")
+    for r in matched_records:
+        r["session_id"] = session_id
+    try:
+        _execute_with_retry(
+            supabase_source.table("matched_gps_data").insert(matched_records)
+        )
+    except Exception as match_err:
+        print(f"[process_trip] matched_gps_data insert failed: {match_err}")
+
+    # ── 3. Merge IMU + GPS (raw + matched) ──────────────────────────────────────
+    imu_df = pd.DataFrame(imu_rows)
 
     # Parse created_at to UTC datetime – used both for Aliv's 'timestamp' and for
     # mapping Aliv's output back to absolute time in enrich_events().
@@ -599,7 +660,7 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
         return
     aliv_trim_offset = 50 * (1000 / fs)
 
-    # ── 5. Enrich events ───────────────────────────────────────────────────────
+    # ── 5. Enrich events (matched coordinates + direction_label) ───────────────
     enriched_events = enrich_events(
         session_id, vehicle_id, user_id, result, df, timesent_T0, aliv_trim_offset
     )
@@ -613,6 +674,8 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     # ── 6. Insert road defects ─────────────────────────────────────────────────
     # user_id and vehicle_id are not columns on imu_events anymore —
     # they're derivable via session_id. Strip them from the DB insert.
+    # direction_label and osm_way_id ARE real columns on imu_events (see
+    # migration.sql) and pass through untouched.
     events_for_db = [
         {k: v for k, v in e.items() if k not in ("vehicle_id", "user_id")}
         for e in enriched_events
@@ -665,3 +728,67 @@ def Aliv_for_MVP1(payload: WebhookPayload, background_tasks: BackgroundTasks):
         session.end_time,
     )
     return {"status": "received"}
+
+
+# ── Full-pipeline replay ─────────────────────────────────────────────────────
+# Wipes hexagons/imu_events/ledger + user_details balances, then reprocesses
+# every existing session strictly in order of end_time (oldest trip first —
+# the trip that finished first gets discovery rights, matching the original
+# chronological order the reward/confidence logic assumes). Calls
+# _process_trip_inner() directly in-process rather than round-tripping
+# through the webhook: since it's a normal (non-background) function call
+# inside this loop, by the time it returns the session's aliv_processed flag
+# is already True, so "wait for the flag" is just "the call returned" — no
+# webhook, no created_at trick, no polling needed.
+
+def _replay_all_sessions_inner():
+    supabase_source = _make_supabase_client(SOURCE_URL, SOURCE_KEY)
+    supabase_target = _make_supabase_client(TARGET_URL, TARGET_KEY)
+
+    print("[replay] resetting hexagons/imu_events/ledger + user_details balances")
+    try:
+        _execute_with_retry(supabase_target.rpc("reset_pipeline", {}))
+    except Exception as err:
+        print(f"[replay] reset_pipeline failed, aborting replay: {err!r}")
+        return
+
+    sessions = fetch_all_pages(
+        supabase_source, table="sessions", filters=[], order_col="end_time",
+    )
+    print(f"[replay] {len(sessions)} sessions to reprocess, oldest end_time first")
+
+    for i, session in enumerate(sessions):
+        session_id = session["session_id"]
+        print(f"[replay] ({i + 1}/{len(sessions)}) session={session_id} end_time={session['end_time']}")
+
+        try:
+            _execute_with_retry(
+                supabase_source.table("sessions")
+                .update({"distance": 0, "aliv_processed": False, "imu_only": True})
+                .eq("session_id", session_id)
+            )
+        except Exception as reset_err:
+            print(f"[replay] failed to reset session {session_id}, skipping: {reset_err!r}")
+            continue
+
+        try:
+            _process_trip_inner(
+                session_id,
+                session["vehicle_id"],
+                session["user_id"],
+                session["start_time"],
+                session["end_time"],
+            )
+        except Exception as trip_err:
+            # Log loudly and move on — one bad trip (e.g. missing IMU/GPS
+            # data) shouldn't stall the other 45.
+            print(f"[replay] session {session_id} FAILED: {trip_err!r} — continuing to next session")
+            continue
+
+    print("[replay] Finished replaying all sessions.")
+
+
+@app.post("/replay_all_sessions")
+def replay_all_sessions(background_tasks: BackgroundTasks):
+    background_tasks.add_task(_replay_all_sessions_inner)
+    return {"status": "replay started"}
