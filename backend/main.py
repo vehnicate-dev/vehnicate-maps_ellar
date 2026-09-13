@@ -89,7 +89,7 @@ def _load_map_matcher() -> None:
     # Parsing the OSM extract into an InMemMap is expensive — do it once per
     # process, never inside process_trip().
     try:
-        init_map_matcher(OSM_PBF_PATH)
+        init_map_matcher(OSM_PBF_PATH, OSM_PBF_URL)
     except Exception as err:
         # Don't crash the whole service if the extract is missing/misconfigured
         # in a given environment — map_match_trip() will raise per-request

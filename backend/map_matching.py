@@ -25,8 +25,10 @@ a forward/backward string.
 """
 from __future__ import annotations
 
+import os
 import osmium as osm
 import pandas as pd
+import requests
 from leuvenmapmatching.map.inmem import InMemMap
 from leuvenmapmatching.matcher.distance import DistanceMatcher
 
@@ -79,9 +81,31 @@ def _build_map_from_pbf(osm_pbf_path: str) -> InMemMap:
     return map_con
 
 
-def init_map_matcher(osm_pbf_path: str) -> None:
+def _ensure_osm_extract(osm_pbf_path: str, osm_pbf_url: str | None) -> None:
+    """Download the extract on first boot if it isn't already on disk.
+    Railway's filesystem is ephemeral, so this runs once per fresh
+    container/deploy, not once ever — a several-to-tens-of-MB city extract
+    downloads in a few seconds, which is fine at startup time."""
+    if os.path.exists(osm_pbf_path):
+        return
+    if not osm_pbf_url:
+        raise RuntimeError(
+            f"{osm_pbf_path} not found on disk and OSM_PBF_URL is not set "
+            "— nothing to download it from."
+        )
+    print(f"[map_matching] {osm_pbf_path} not found, downloading from {osm_pbf_url}")
+    with requests.get(osm_pbf_url, stream=True, timeout=120) as resp:
+        resp.raise_for_status()
+        with open(osm_pbf_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                f.write(chunk)
+    print(f"[map_matching] downloaded {os.path.getsize(osm_pbf_path):,} bytes to {osm_pbf_path}")
+
+
+def init_map_matcher(osm_pbf_path: str, osm_pbf_url: str | None = None) -> None:
     """Call once at FastAPI startup (see main.py's startup event)."""
     global _MAP_CON
+    _ensure_osm_extract(osm_pbf_path, osm_pbf_url)
     _MAP_CON = _build_map_from_pbf(osm_pbf_path)
     print(f"[map_matching] loaded OSM extract from {osm_pbf_path}")
 
