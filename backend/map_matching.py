@@ -42,23 +42,18 @@ OBS_NOISE_M = 10
 _ONEWAY_VALUES = {"yes", "1", "true"}
 
 
-class _RoadGraphHandler(osm.SimpleHandler):
-    """Walks the .pbf once, adding every node and every highway-tagged way's
-    edges to map_con. Doesn't need pyosmium's locations=True node-location
-    cache — add_edge only needs numeric node ids; InMemMap fills in each
-    node's coordinate separately via add_node, whichever order they arrive
-    in, so skipping the location index keeps this pass faster."""
+class _WayCollector(osm.SimpleHandler):
+    """Pass 1: which node ids are actually part of a highway way, and the
+    directed edge list to build. Skips every non-road node (buildings, POIs,
+    etc.) up front — for a large extract those vastly outnumber road nodes,
+    and were the source of the OOM crash when every node got added
+    unconditionally."""
 
-    def __init__(self, map_con: InMemMap):
+    def __init__(self):
         osm.SimpleHandler.__init__(self)
-        self.map_con = map_con
+        self.way_node_ids: set = set()
+        self.edges: list = []  # (node_a, node_b, oneway)
         self.way_count = 0
-        self.node_count = 0
-
-    def node(self, n):
-        if n.location.valid():
-            self.map_con.add_node(n.id, (n.location.lat, n.location.lon))
-            self.node_count += 1
 
     def way(self, w):
         if "highway" not in w.tags:
@@ -66,18 +61,42 @@ class _RoadGraphHandler(osm.SimpleHandler):
         oneway = w.tags.get("oneway", "").lower() in _ONEWAY_VALUES
         node_ids = [n.ref for n in w.nodes]
         for a, b in zip(node_ids, node_ids[1:]):
-            self.map_con.add_edge(a, b)
-            if not oneway:
-                self.map_con.add_edge(b, a)
+            self.edges.append((a, b, oneway))
+        self.way_node_ids.update(node_ids)
         self.way_count += 1
+
+
+class _NodeCollector(osm.SimpleHandler):
+    """Pass 2: only add coordinates for node ids collected in pass 1."""
+
+    def __init__(self, wanted_ids: set, map_con: InMemMap):
+        osm.SimpleHandler.__init__(self)
+        self.wanted_ids = wanted_ids
+        self.map_con = map_con
+        self.node_count = 0
+
+    def node(self, n):
+        if n.id in self.wanted_ids and n.location.valid():
+            self.map_con.add_node(n.id, (n.location.lat, n.location.lon))
+            self.node_count += 1
 
 
 def _build_map_from_pbf(osm_pbf_path: str) -> InMemMap:
     map_con = InMemMap("chennai", use_latlon=True, use_rtree=True, index_edges=True)
-    handler = _RoadGraphHandler(map_con)
-    handler.apply_file(osm_pbf_path)
+
+    way_collector = _WayCollector()
+    way_collector.apply_file(osm_pbf_path)
+
+    for a, b, oneway in way_collector.edges:
+        map_con.add_edge(a, b)
+        if not oneway:
+            map_con.add_edge(b, a)
+
+    node_collector = _NodeCollector(way_collector.way_node_ids, map_con)
+    node_collector.apply_file(osm_pbf_path)
+
     map_con.purge()  # drop edges referencing nodes that were never added
-    print(f"[map_matching] built graph from {handler.way_count} ways, {handler.node_count} nodes")
+    print(f"[map_matching] built graph from {way_collector.way_count} ways, {node_collector.node_count} nodes")
     return map_con
 
 
