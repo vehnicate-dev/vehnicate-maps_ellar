@@ -68,6 +68,7 @@ TARGET_KEY = os.environ.get("TARGET_KEY")
 
 # Chennai OSM extract used for map-matching. Loaded once at startup.
 OSM_PBF_PATH = os.environ.get("OSM_PBF_PATH", "chennai.osm.pbf")
+OSM_PBF_URL = os.environ.get("OSM_PBF_URL")
 
 # Must match AlivRoadDefects(fs=…) below
 #ALIV_FS          = 40 # previously 80
