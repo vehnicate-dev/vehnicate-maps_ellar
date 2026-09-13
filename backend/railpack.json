@@ -1,0 +1,7 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "buildAptPackages": ["libexpat1", "zlib1g", "libbz2-1.0"],
+  "deploy": {
+    "aptPackages": ["libexpat1", "zlib1g", "libbz2-1.0"]
+  }
+}
