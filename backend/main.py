@@ -246,6 +246,10 @@ def sanitize_for_json(obj):
         return [sanitize_for_json(i) for i in obj]
     if isinstance(obj, dict):
         return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if hasattr(obj, "item") and not isinstance(obj, (str, bytes)):
+        # Covers numpy int64/float64/bool_ and similar scalar types —
+        # .item() converts to the nearest native Python type.
+        return sanitize_for_json(obj.item())
     return obj
 
 def merge_gps_into_imu(imu_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFrame:
@@ -370,7 +374,7 @@ def enrich_events(
         event_direction = dir_counts.idxmax() if not dir_counts.empty else None
 
         way_counts = subset["osm_way_id"].dropna().value_counts()
-        event_way_id = way_counts.idxmax() if not way_counts.empty else None
+        event_way_id = int(way_counts.idxmax()) if not way_counts.empty else None
 
         enriched.append({
             "user_id":    user_id,
