@@ -55,7 +55,7 @@ class _WayCollector(osm.SimpleHandler):
     def __init__(self):
         osm.SimpleHandler.__init__(self)
         self.way_node_ids: set = set()
-        self.edges: list = []
+        self.edges: list = []          # (a, b, oneway, way_id) — way_id added
         self.way_count = 0
 
     def way(self, w):
@@ -64,7 +64,7 @@ class _WayCollector(osm.SimpleHandler):
         oneway = w.tags.get("oneway", "").lower() in _ONEWAY_VALUES
         node_ids = [n.ref for n in w.nodes]
         for a, b in zip(node_ids, node_ids[1:]):
-            self.edges.append((a, b, oneway))
+            self.edges.append((a, b, oneway, w.id))   # tag every edge with its parent way
         self.way_node_ids.update(node_ids)
         self.way_count += 1
 
@@ -83,6 +83,37 @@ class _NodeCollector(osm.SimpleHandler):
             self.map_con.add_node(n.id, (n.location.lat, n.location.lon))
             self.added_ids.add(n.id)
 
+_EDGE_TO_WAY: dict[tuple[int, int], int] = {}
+
+
+def _build_map_from_pbf(osm_pbf_path: str) -> InMemMap:
+    global _EDGE_TO_WAY
+    map_con = InMemMap("chennai", use_latlon=True, use_rtree=True, index_edges=True)
+
+    way_collector = _WayCollector()
+    way_collector.apply_file(osm_pbf_path)
+
+    node_collector = _NodeCollector(way_collector.way_node_ids, map_con)
+    node_collector.apply_file(osm_pbf_path)
+
+    skipped = 0
+    edge_to_way = {}
+    for a, b, oneway, way_id in way_collector.edges:
+        if a not in node_collector.added_ids or b not in node_collector.added_ids:
+            skipped += 1
+            continue
+        map_con.add_edge(a, b)
+        edge_to_way[(min(a, b), max(a, b))] = way_id
+        if not oneway:
+            map_con.add_edge(b, a)
+
+    map_con.purge()
+    _EDGE_TO_WAY = edge_to_way
+    print(
+        f"[map_matching] built graph from {way_collector.way_count} ways, "
+        f"{len(node_collector.added_ids)} nodes ({skipped} edges skipped for missing nodes)"
+    )
+    return map_con
 
 def _bearing_deg(lat1, lon1, lat2, lon2) -> float:
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -291,7 +322,7 @@ def map_match_trip(gps_df: pd.DataFrame) -> pd.DataFrame:
         if state is None:
             continue
         node1, node2 = state[0], state[1]
-        way_ids[i] = f"{min(node1, node2)}-{max(node1, node2)}"
+        way_ids[i] = _EDGE_TO_WAY.get((min(node1, node2), max(node1, node2)))
         directions[i] = "forward" if node1 < node2 else "backward"
         try:
             lat, lon = _MAP_CON.node_coordinates(node2)
