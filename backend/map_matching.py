@@ -24,6 +24,7 @@ edge, so it's used directly as direction_label rather than collapsing it to
 a forward/backward string.
 """
 from __future__ import annotations
+import math
 
 import os
 import osmium as osm
@@ -38,6 +39,9 @@ _MAP_CON: InMemMap | None = None
 # (5-15m urban), not the ~7-decimal-place string precision of the raw fixes.
 MAX_DIST_M = 50
 OBS_NOISE_M = 10
+
+BEARING_TRUST_SPEED_MPS = 2.5   # below this, GPS course-over-ground is too noisy to trust
+BEARING_DISAGREEMENT_DEG = 60.0  # edge bearing vs. raw GPS bearing beyond this = suspect
 
 _ONEWAY_VALUES = {"yes", "1", "true"}
 
@@ -79,6 +83,100 @@ class _NodeCollector(osm.SimpleHandler):
             self.map_con.add_node(n.id, (n.location.lat, n.location.lon))
             self.added_ids.add(n.id)
 
+
+def _bearing_deg(lat1, lon1, lat2, lon2) -> float:
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dlambda = math.radians(lon2 - lon1)
+    y = math.sin(dlambda) * math.cos(phi2)
+    x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlambda)
+    return math.degrees(math.atan2(y, x)) % 360
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in meters. Fine at this scale (10s-100s of m);
+    no need for anything more precise than the equirectangular/haversine
+    approximation given obs_noise is already ~10-40m."""
+    R = 6371000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+def _circular_diff_deg(a: float, b: float) -> float:
+    return abs((a - b + 180) % 360 - 180)
+
+def _project_point_to_segment(lat, lon, lat1, lon1, lat2, lon2):
+    """Equirectangular-local projection — fine at road-segment scale (10s of m)."""
+    lat0 = math.radians((lat1 + lat2) / 2)
+    def to_xy(la, lo):
+        return (lo * math.cos(lat0) * 111320, la * 111320)
+    px, py = to_xy(lat, lon)
+    x1, y1 = to_xy(lat1, lon1)
+    x2, y2 = to_xy(lat2, lon2)
+    dx, dy = x2 - x1, y2 - y1
+    seg_len_sq = dx * dx + dy * dy
+    t = 0.0 if seg_len_sq == 0 else max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / seg_len_sq))
+    proj_lat = lat1 + t * (lat2 - lat1)
+    proj_lon = lon1 + t * (lon2 - lon1)
+    dist = math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+    return proj_lat, proj_lon, dist
+
+def _despike_parallel_road_snaps(gps_df: pd.DataFrame, states: list) -> None:
+    """Mutates matched_lat/lon/osm_way_id/direction_label/match_raw_distance
+    in-place on gps_df for single-point mis-snaps onto a parallel road,
+    detected via GPS-bearing disagreement against the matched edge."""
+    way_ids = gps_df["osm_way_id"].tolist()
+    n = len(gps_df)
+
+    for i in range(1, n - 1):
+        state = states[i] if i < len(states) else None
+        if state is None or way_ids[i] is None:
+            continue
+        if way_ids[i - 1] != way_ids[i + 1] or way_ids[i - 1] == way_ids[i]:
+            continue  # not an isolated single-point blip flanked by the same road
+
+        speed = gps_df["speed"].iat[i] if "speed" in gps_df.columns else None
+        raw_bearing = gps_df["bearing"].iat[i] if "bearing" in gps_df.columns else None
+        if speed is None or raw_bearing is None or speed < BEARING_TRUST_SPEED_MPS:
+            continue
+
+        node1, node2 = state[0], state[1]
+        try:
+            lat1, lon1 = _MAP_CON.node_coordinates(node1)
+            lat2, lon2 = _MAP_CON.node_coordinates(node2)
+        except Exception:
+            continue
+        edge_bearing = _bearing_deg(lat1, lon1, lat2, lon2)
+
+        if _circular_diff_deg(edge_bearing, raw_bearing) < BEARING_DISAGREEMENT_DEG:
+            continue  # this point's own snap is directionally consistent — leave it
+
+        # Suspect: re-snap onto the neighbors' shared way instead. Reuse the
+        # prior point's edge geometry as the candidate segment — good enough
+        # since the blip is a single point.
+        prev_state = states[i - 1]
+        if prev_state is None:
+            continue
+        pn1, pn2 = prev_state[0], prev_state[1]
+        try:
+            plat1, plon1 = _MAP_CON.node_coordinates(pn1)
+            plat2, plon2 = _MAP_CON.node_coordinates(pn2)
+        except Exception:
+            continue
+
+        raw_lat, raw_lon = gps_df["latitude"].iat[i], gps_df["longitude"].iat[i]
+        proj_lat, proj_lon, dist_m = _project_point_to_segment(
+            raw_lat, raw_lon, plat1, plon1, plat2, plon2
+        )
+
+        print(f"[map_matching] despiked idx={i}: way {way_ids[i]} -> {way_ids[i-1]} "
+            f"(edge/gps bearing diff {_circular_diff_deg(edge_bearing, raw_bearing):.0f}deg)")
+
+        gps_df.at[gps_df.index[i], "matched_lat"] = proj_lat
+        gps_df.at[gps_df.index[i], "matched_lon"] = proj_lon
+        gps_df.at[gps_df.index[i], "osm_way_id"] = way_ids[i - 1]
+        gps_df.at[gps_df.index[i], "direction_label"] = gps_df["direction_label"].iat[i - 1]
+        gps_df.at[gps_df.index[i], "match_raw_distance"] = dist_m
 
 def _build_map_from_pbf(osm_pbf_path: str) -> InMemMap:
     map_con = InMemMap("chennai", use_latlon=True, use_rtree=True, index_edges=True)
@@ -160,7 +258,7 @@ def map_match_trip(gps_df: pd.DataFrame) -> pd.DataFrame:
     gps_df = gps_df.sort_values("timestamp_ms").reset_index(drop=True)
 
     if gps_df.empty:
-        for col in ("matched_lat", "matched_lon", "osm_way_id", "direction_label"):
+        for col in ("matched_lat", "matched_lon", "osm_way_id", "direction_label", "match_raw_distance"):
             gps_df[col] = None
         return gps_df
 
@@ -173,7 +271,7 @@ def map_match_trip(gps_df: pd.DataFrame) -> pd.DataFrame:
         obs_noise=20,          # was 10 — closer to Chennai's real multipath/urban-canyon error, still tighter than the library's own generic-GPX example (50)
         obs_noise_ne=40,       # explicit, > obs_noise per the library's own guidance
         non_emitting_states=True,
-        max_lattice_width=5,   # bounds search cost — not set currently, and matters more once max_dist is widened
+        max_lattice_width=10,   # bounds search cost — not set currently, and matters more once max_dist is widened
     )
     try:
         states, _ = matcher.match(trace)
@@ -185,6 +283,7 @@ def map_match_trip(gps_df: pd.DataFrame) -> pd.DataFrame:
     matched_lon = gps_df["longitude"].tolist()
     way_ids: list = [None] * len(gps_df)
     directions: list = [None] * len(gps_df)
+    match_raw_distance: list = [None] * len(gps_df)  # NEW
 
     n_matched = min(len(states), len(gps_df))
     for i in range(n_matched):
@@ -197,6 +296,14 @@ def map_match_trip(gps_df: pd.DataFrame) -> pd.DataFrame:
         try:
             lat, lon = _MAP_CON.node_coordinates(node2)
             matched_lat[i], matched_lon[i] = lat, lon
+            # Raw fix vs. where it actually got snapped to — replaces the
+            # unused match_confidence column. None (not 0.0) when a fix
+            # wasn't matched at all, since matched_lat/lon just fall back
+            # to the raw coordinate in that case and a 0.0 distance would
+            # misleadingly read as "snapped exactly here."
+            match_raw_distance[i] = _haversine_m(
+                gps_df["latitude"].iat[i], gps_df["longitude"].iat[i], lat, lon
+            )
         except Exception as err:
             print(f"[map_matching] node lookup failed for node={node2}: {err!r}")
 
@@ -204,8 +311,16 @@ def map_match_trip(gps_df: pd.DataFrame) -> pd.DataFrame:
     gps_df["matched_lon"] = matched_lon
     gps_df["osm_way_id"] = way_ids
     gps_df["direction_label"] = directions
+    gps_df["match_raw_distance"] = match_raw_distance  # NEW
 
+    if "bearing" in gps_df.columns and "speed" in gps_df.columns:
+        _despike_parallel_road_snaps(gps_df, states)
+    else:
+        print("[map_matching] skipping bearing despike — bearing/speed not in gps_df")
+    
     n_ok = sum(1 for d in directions if d is not None)
-    print(f"[map_matching] matched {n_ok}/{len(gps_df)} fixes")
+    dists = [d for d in match_raw_distance if d is not None]
+    avg_dist = sum(dists) / len(dists) if dists else float("nan")
+    print(f"[map_matching] matched {n_ok}/{len(gps_df)} fixes, avg match_raw_distance={avg_dist:.1f}m")
 
     return gps_df

@@ -410,12 +410,12 @@ function buildHoverHTML(row, param, lastDetectedStr) {
 
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <span style="color:#ccc;font-weight:600;">Latitude</span>
-        <span style="color:#fff;">${Number(row.lat).toFixed(6)}</span>
+        <span style="color:#fff;">${row.lat}</span>
       </div>
 
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <span style="color:#ccc;font-weight:600;">Longitude</span>
-        <span style="color:#fff;">${Number(row.lon).toFixed(6)}</span>
+        <span style="color:#fff;">${row.lat}</span>
       </div>
 
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">

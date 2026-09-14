@@ -38,8 +38,9 @@ imu_data  : accel_x/y/z  → renamed to accelx/y/z    (Aliv key)
 gps_data  : latitude, longitude, speed               (Aliv uses these directly — RAW,
             unaffected by map-matching; Aliv's own "has the vehicle moved" gate only
             needs a rough fix, not a road-snapped one)
-matched_gps_data : matched_lat, matched_lon, osm_way_id, direction_label — used by
-            enrich_events() for reported defect locations/direction, NOT fed into Aliv.
+matched_gps_data : matched_lat, matched_lon, osm_way_id, direction_label,
+            match_raw_distance — used by enrich_events() for reported
+            defect locations/direction, NOT fed into Aliv.
 
 Aliv time output
 ────────────────
@@ -659,7 +660,8 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     gps_df = map_match_trip(gps_df)
 
     matched_records = gps_df[[
-        "timestamp_ms", "matched_lat", "matched_lon", "osm_way_id", "direction_label",
+        "timestamp_ms", "matched_lat", "matched_lon", "osm_way_id",
+        "direction_label", "match_raw_distance",
     ]].to_dict(orient="records")
     matched_records = [sanitize_for_json(r) for r in matched_records]
     for r in matched_records:
