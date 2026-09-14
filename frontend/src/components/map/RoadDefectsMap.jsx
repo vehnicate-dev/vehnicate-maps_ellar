@@ -404,20 +404,35 @@ async function buildImagePopupHTML(row, param, frames, rotation = 0, opts = {}) 
 
 function buildHoverHTML(row, param, lastDetectedStr) {
   const color = getEventColor(param);
+
   return `
-    <div style="font-family:monospace;font-size:12px;min-width:180px;">
+    <div style="font-family:monospace;font-size:12px;min-width:200px;">
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <span style="color:#ccc;font-weight:600;">Latitude</span>
+        <span style="color:#fff;">${Number(row.lat).toFixed(6)}</span>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <span style="color:#ccc;font-weight:600;">Longitude</span>
+        <span style="color:#fff;">${Number(row.lon).toFixed(6)}</span>
+      </div>
+
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <span style="color:#ccc;font-weight:600;">Last detected</span>
         <span style="color:#fff;">${lastDetectedStr || "…"}</span>
       </div>
+
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <span style="color:#ccc;font-weight:600;">Parameter</span>
         <span style="font-weight:700;color:${color};">${param.toFixed(3)}</span>
       </div>
+
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <span style="color:#ccc;font-weight:600;">Detections</span>
         <span style="color:#a855f7;font-weight:700;">${row.parameters.length}</span>
       </div>
+
     </div>`;
 }
 function buildMerchantFlagIcon() {

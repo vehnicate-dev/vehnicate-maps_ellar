@@ -168,9 +168,12 @@ def map_match_trip(gps_df: pd.DataFrame) -> pd.DataFrame:
 
     matcher = DistanceMatcher(
         _MAP_CON,
-        max_dist=MAX_DIST_M,
-        obs_noise=OBS_NOISE_M,
+        max_dist=100,          # was 50 — the hard cutoff was very likely the actual bottleneck
+        max_dist_init=40,      # give the anchor point more room than mid-trip fixes get
+        obs_noise=20,          # was 10 — closer to Chennai's real multipath/urban-canyon error, still tighter than the library's own generic-GPX example (50)
+        obs_noise_ne=40,       # explicit, > obs_noise per the library's own guidance
         non_emitting_states=True,
+        max_lattice_width=5,   # bounds search cost — not set currently, and matters more once max_dist is widened
     )
     try:
         states, _ = matcher.match(trace)
