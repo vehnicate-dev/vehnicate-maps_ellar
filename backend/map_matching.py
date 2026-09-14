@@ -209,38 +209,6 @@ def _despike_parallel_road_snaps(gps_df: pd.DataFrame, states: list) -> None:
         gps_df.at[gps_df.index[i], "direction_label"] = gps_df["direction_label"].iat[i - 1]
         gps_df.at[gps_df.index[i], "match_raw_distance"] = dist_m
 
-def _build_map_from_pbf(osm_pbf_path: str) -> InMemMap:
-    map_con = InMemMap("chennai", use_latlon=True, use_rtree=True, index_edges=True)
-
-    # Pass 1: which nodes matter (referenced by a highway way), and the
-    # directed edges to build.
-    way_collector = _WayCollector()
-    way_collector.apply_file(osm_pbf_path)
-
-    # Pass 2: add_node() must run for BOTH endpoints of an edge before
-    # add_edge() is called on it — InMemMap.add_edge() raises ValueError
-    # otherwise ("Add <id> first as node"). This is why nodes are added
-    # here, before any add_edge call below, not the other way around.
-    node_collector = _NodeCollector(way_collector.way_node_ids, map_con)
-    node_collector.apply_file(osm_pbf_path)
-
-    # Now safe to add edges — but a node can still be missing if it had no
-    # valid location in the extract (rare, but skip rather than crash).
-    skipped = 0
-    for a, b, oneway in way_collector.edges:
-        if a not in node_collector.added_ids or b not in node_collector.added_ids:
-            skipped += 1
-            continue
-        map_con.add_edge(a, b)
-        if not oneway:
-            map_con.add_edge(b, a)
-
-    map_con.purge()  # drop edges referencing nodes that were never added
-    print(
-        f"[map_matching] built graph from {way_collector.way_count} ways, "
-        f"{len(node_collector.added_ids)} nodes ({skipped} edges skipped for missing nodes)"
-    )
-    return map_con
 
 
 def _ensure_osm_extract(osm_pbf_path: str, osm_pbf_url: str | None) -> None:
