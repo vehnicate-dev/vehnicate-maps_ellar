@@ -85,7 +85,8 @@ ANGLE_THRESHOLD_DEG       = 35.0  # |mount yaw offset| beyond this → imu_only 
 MIN_ACCEL_ENERGY          = 5.0   # sum(|a_gps|) needed across the trip before trusting the estimate
 GRAVITY_LOWPASS_WINDOW_S  = 1.5   # rolling window used to separate gravity from user_accel noise
 MIN_COHERENCE = 0.1  # su,sv vector magnitude / energy — below this, the direction estimate is noise-dominated
-
+MIN_GPS_POINTS = 10  # fewer raw GPS fixes than this → too sparse to trust map-matching/distance/Aliv
+MIN_TRIP_DISTANCE_M = 50  # trips that moved less than this overall aren't worth map-matching/Aliv
 app = FastAPI()
 
 
@@ -611,8 +612,50 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
         print("[process_trip] No GPS data, skipping.")
         return
 
-    # ── 2a. Map-match GPS onto OSM and persist the matched trajectory ──────────
+    if len(gps_rows) < MIN_GPS_POINTS:
+        print(f"[process_trip] Only {len(gps_rows)} GPS points (< {MIN_GPS_POINTS}), "
+            f"marking aliv_processed and skipping map-matching/Aliv.")
+        _mark_aliv_processed(supabase_source, session_id)
+        return
+
     gps_df = pd.DataFrame(gps_rows)
+
+    # ── 2a. Total distance, computed on RAW fixes before spending anything on
+    # map-matching — a session that barely moved doesn't need a road-snapped
+    # trace or an Aliv run either.
+    total_distance_m = compute_total_distance(gps_df)
+    print(f"[process_trip] Total distance: {total_distance_m:.2f} m")
+
+    # ── 3. Merge prep + mount-orientation check ─────────────────────────────
+    # imu_only doesn't depend on map-matching (it reads raw gps_df + imu_df
+    # directly), so it still runs here, before we decide whether to bother
+    # matching/Aliv-ing this trip at all — same "every run, regardless of
+    # aliv_processed" behavior as before.
+    imu_df = pd.DataFrame(imu_rows)
+    imu_df["created_at"] = pd.to_datetime(imu_df["created_at"], utc=True, errors="coerce")
+    fs = estimate_fs(imu_df, time_col="timestamp_ms")
+
+    imu_only = _update_imu_only(supabase_source, session_id, gps_df, imu_df, current_imu_only)
+
+    if already_processed:
+        print("[process_trip] Finished (imu_only re-check only).")
+        return
+
+    if total_distance_m < MIN_TRIP_DISTANCE_M:
+        print(f"[process_trip] Trip moved only {total_distance_m:.2f}m "
+            f"(< {MIN_TRIP_DISTANCE_M}m), marking aliv_processed and skipping map-matching/Aliv.")
+        try:
+            _execute_with_retry(
+                supabase_source.table("sessions")
+                .update({"distance": total_distance_m / 1000})
+                .eq("session_id", session_id)
+            )
+        except Exception as dist_err:
+            print(f"[process_trip] distance update failed: {dist_err}")
+        _mark_aliv_processed(supabase_source, session_id)
+        return
+
+    # ── 3a. Map-match GPS onto OSM and persist the matched trajectory ──────────
     gps_df = map_match_trip(gps_df)
 
     matched_records = gps_df[[
@@ -628,37 +671,14 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     except Exception as match_err:
         print(f"[process_trip] matched_gps_data insert failed: {match_err}")
 
-    # ── 3. Merge IMU + GPS (raw + matched) ──────────────────────────────────────
-    imu_df = pd.DataFrame(imu_rows)
-
-    # Parse created_at to UTC datetime – used both for Aliv's 'timestamp' and for
-    # mapping Aliv's output back to absolute time in enrich_events().
-    imu_df["created_at"] = pd.to_datetime(imu_df["created_at"], utc=True, errors="coerce")
-    fs = estimate_fs(imu_df, time_col="timestamp_ms")
-
     df = merge_gps_into_imu(imu_df, gps_df)
-
-    # T0: the absolute UTC time of the first IMU row – anchor for Aliv's time axis.
     timesent_T0 = pd.to_datetime(df["timestamp_ms"].iloc[0], unit="ms", utc=True)
 
-    # ── 3a. Mount-orientation check (imu_only) ─────────────────────────────────
-    # Runs regardless of aliv_processed — safe to rerun, has no ledger/hexagon
-    # side effects, and this lets you test the logic against sessions Aliv has
-    # already fully processed.
-    imu_only = _update_imu_only(supabase_source, session_id, gps_df, imu_df, current_imu_only)
-
-    if already_processed:
-        print("[process_trip] Finished (imu_only re-check only).")
-        return
-
-    # ── 3b. Compute total distance and update sessions table ───────────────────
-    total_distance_m = compute_total_distance(gps_df)
-    print(f"[process_trip] Total distance: {total_distance_m:.2f} m")
-
+    # ── 3b. Update sessions.distance ────────────────────────────────────────
     try:
         _execute_with_retry(
             supabase_source.table("sessions")
-            .update({"distance": total_distance_m/1000})
+            .update({"distance": total_distance_m / 1000})
             .eq("session_id", session_id)
         )
     except Exception as dist_err:
