@@ -293,18 +293,17 @@ def map_match_trip(gps_df: pd.DataFrame) -> pd.DataFrame:
         way_ids[i] = _EDGE_TO_WAY.get((min(node1, node2), max(node1, node2)))
         directions[i] = "forward" if node1 < node2 else "backward"
         try:
-            lat, lon = _MAP_CON.node_coordinates(node2)
-            matched_lat[i], matched_lon[i] = lat, lon
-            # Raw fix vs. where it actually got snapped to — replaces the
-            # unused match_confidence column. None (not 0.0) when a fix
-            # wasn't matched at all, since matched_lat/lon just fall back
-            # to the raw coordinate in that case and a 0.0 distance would
-            # misleadingly read as "snapped exactly here."
-            match_raw_distance[i] = _haversine_m(
-                gps_df["latitude"].iat[i], gps_df["longitude"].iat[i], lat, lon
+            lat1, lon1 = _MAP_CON.node_coordinates(node1)
+            lat2, lon2 = _MAP_CON.node_coordinates(node2)
+            raw_lat = gps_df["latitude"].iat[i]
+            raw_lon = gps_df["longitude"].iat[i]
+            proj_lat, proj_lon, dist_m = _project_point_to_segment(
+                raw_lat, raw_lon, lat1, lon1, lat2, lon2
             )
+            matched_lat[i], matched_lon[i] = proj_lat, proj_lon
+            match_raw_distance[i] = dist_m
         except Exception as err:
-            print(f"[map_matching] node lookup failed for node={node2}: {err!r}")
+            print(f"[map_matching] node lookup failed for edge=({node1},{node2}): {err!r}")
 
     gps_df["matched_lat"] = matched_lat
     gps_df["matched_lon"] = matched_lon

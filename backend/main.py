@@ -210,20 +210,19 @@ def fetch_all_pages(
     filters: list,
     order_col: str,
     page_size: int = 1000,
+    tiebreak_col: str | None = None,   # NEW — must be unique per row
 ) -> list:
-    """Paginated fetch from a Supabase table.
-
-    filters is a list of (method_name, *args) tuples applied to the query,
-    e.g. [("eq", "session_id", sid)].
-    """
     all_data = []
     start = 0
     while True:
         query = supabase_client.table(table).select("*")
         for method, *args in filters:
             query = getattr(query, method)(*args)
+        query = query.order(order_col, desc=False)
+        if tiebreak_col:
+            query = query.order(tiebreak_col, desc=False)   # deterministic tiebreak
         batch = _execute_with_retry(
-            query.order(order_col, desc=False).range(start, start + page_size - 1)
+            query.range(start, start + page_size - 1)
         ).data
 
         if not batch:
@@ -599,6 +598,7 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
         table="imu_data",
         filters=[("eq", "session_id", session_id)],
         order_col="timestamp_ms",
+        tiebreak_col="imu_data_id",
     )
     print(f"[process_trip] IMU rows fetched: {len(imu_rows)}")
     if not imu_rows:
@@ -611,6 +611,7 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
         table="gps_data",
         filters=[("eq", "session_id", session_id)],
         order_col="timestamp_ms",
+        tiebreak_col="gps_id",
     )
     print(f"[process_trip] GPS rows fetched: {len(gps_rows)}")
     if not gps_rows:
