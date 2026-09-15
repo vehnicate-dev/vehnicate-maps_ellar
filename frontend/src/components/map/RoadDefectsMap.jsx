@@ -9,7 +9,7 @@ import "leaflet-doubletapdragzoom";
 
 // ─── Supabase config ──────────────────────────────────────────────────────────
 const SUPABASE_URL = "https://mmjusghgeedycrrfdejg.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1tanVzZ2hnZWVkeWNycmZkZWpnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU0MDIzNjAsImV4cCI6MjA5MDk3ODM2MH0.9HlVedDwECf_kAV0iOWB6Gsww8F_Sqx_ugdZUIsG2Yg";
+const SUPABASE_ANON_KEY = "sb_publishable_unNgZxi4yyID9qAAy3d2dg_dGJLpv3N";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
