@@ -819,7 +819,10 @@ def _replay_all_sessions_inner():
     sessions = fetch_all_pages(
         supabase_source, table="sessions", filters=[], order_col="end_time",
     )
-    print(f"[replay] {len(sessions)} sessions to reprocess, oldest end_time first")
+    total_fetched = len(sessions)
+    sessions = [s for s in sessions if s.get("end_time")]
+    skipped = total_fetched - len(sessions)
+    print(f"[replay] {len(sessions)} sessions to reprocess (skipped {skipped} with null end_time), oldest end_time first")
 
     for i, session in enumerate(sessions):
         session_id = session["session_id"]
