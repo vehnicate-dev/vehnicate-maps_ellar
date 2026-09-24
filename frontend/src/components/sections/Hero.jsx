@@ -190,7 +190,7 @@ const Hero = () => {
   return (
     <section
       id="home"
-      className="min-h-screen flex items-center bg-black relative overflow-hidden pt-20"
+      className="min-h-screen flex items-start lg:items-center bg-black relative overflow-hidden pt-24 lg:pt-20"
     >
       {/* ========================================================
           BACKGROUND
@@ -269,7 +269,7 @@ const Hero = () => {
         {/* ======================================================
             TWO COLUMN SECTION
         ======================================================= */}
-        <div className="flex flex-col lg:flex-row items-center lg:items-start justify-between gap-6 lg:gap-10">
+        <div className="flex flex-col lg:flex-row items-center lg:items-start justify-between gap-2 lg:gap-10">
 
           {/* ====================================================
               LEFT SIDE
@@ -291,21 +291,18 @@ const Hero = () => {
                 to="/map"
                 initial={{ opacity: 0, y: -20 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{
-                  delay: 0.2,
-                  duration: 0.8,
-                }}
+                transition={{ delay: 0.2, duration: 0.8 }}
                 whileHover={{ y: -2 }}
                 whileTap={{ scale: 0.97 }}
-                className="inline-flex items-center px-4 py-2 bg-white/[0.035] border border-white/10 rounded-2xl backdrop-blur-sm hover:bg-white/[0.06] hover:border-white/20 transition-all duration-300 cursor-pointer"
+                className="group inline-flex items-center px-4 py-2 bg-white/[0.035] border border-white/10 rounded-2xl backdrop-blur-sm hover:bg-white/[0.06] hover:border-white/20 transition-all duration-300 cursor-pointer"
               >
-                <span className="text-xs sm:text-sm font-medium text-gray-300">
+                <span className="text-xs sm:text-sm font-medium text-purple-300 underline underline-offset-4 decoration-purple-400/50 group-hover:text-pink-400 group-hover:decoration-pink-400/60 transition-colors duration-300">
                   maps is now live
                 </span>
 
                 <span className="mx-2 w-1 h-1 rounded-full bg-white/70 shrink-0" />
 
-                <span className="text-xs sm:text-sm font-medium text-gray-300">
+                <span className="text-xs sm:text-sm font-medium text-purple-300 underline underline-offset-4 decoration-purple-400/50 group-hover:text-pink-400 group-hover:decoration-pink-400/60 transition-colors duration-300">
                   explore!
                 </span>
               </MotionLink>
@@ -317,21 +314,18 @@ const Hero = () => {
                 rel="noopener noreferrer"
                 initial={{ opacity: 0, y: -20 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{
-                  delay: 0.32,
-                  duration: 0.8,
-                }}
+                transition={{ delay: 0.32, duration: 0.8 }}
                 whileHover={{ y: -2 }}
                 whileTap={{ scale: 0.97 }}
-                className="inline-flex items-center px-4 py-2 bg-white/[0.035] border border-white/10 rounded-2xl backdrop-blur-sm hover:bg-white/[0.06] hover:border-white/20 transition-all duration-300 cursor-pointer"
+                className="group inline-flex items-center px-4 py-2 bg-white/[0.035] border border-white/10 rounded-2xl backdrop-blur-sm hover:bg-white/[0.06] hover:border-white/20 transition-all duration-300 cursor-pointer"
               >
-                <span className="text-xs sm:text-sm font-medium text-gray-300">
+                <span className="text-xs sm:text-sm font-medium text-purple-300 underline underline-offset-4 decoration-purple-400/50 group-hover:text-pink-400 group-hover:decoration-pink-400/60 transition-colors duration-300">
                   the vehnicate app is on the playstore
                 </span>
 
                 <span className="mx-2 w-1 h-1 rounded-full bg-white/70 shrink-0" />
 
-                <span className="text-xs sm:text-sm font-medium text-gray-300">
+                <span className="text-xs sm:text-sm font-medium text-purple-300 underline underline-offset-4 decoration-purple-400/50 group-hover:text-pink-400 group-hover:decoration-pink-400/60 transition-colors duration-300">
                   drive &amp; earn Ellars!
                 </span>
               </motion.a>
@@ -396,7 +390,7 @@ const Hero = () => {
           {/* ====================================================
               RIGHT SIDE - IMAGE
           ===================================================== */}
-          <div className="w-full lg:w-1/2 flex justify-center items-center relative max-w-md sm:max-w-lg lg:max-w-none">
+          <div className="w-full lg:w-1/2 flex justify-center items-center relative max-w-md sm:max-w-lg lg:max-w-none -mt-2 lg:mt-0">
 
             {/* Base Image */}
             <motion.div
@@ -418,7 +412,7 @@ const Hero = () => {
               <img
                 src="/gggyrate.svg"
                 alt="Hero Illustration Background"
-                className="max-w-full h-auto rounded-2xl shadow-lg"
+                className="max-w-full h-auto w-auto max-h-[34vh] sm:max-h-[42vh] lg:max-h-none object-contain rounded-2xl shadow-lg"
               />
             </motion.div>
 
@@ -442,7 +436,7 @@ const Hero = () => {
               <img
                 src="/pothole_speedbreaker_ellar.png"
                 alt="Hero Illustration Overlay"
-                className="w-3/4 sm:w-4/5 lg:w-full max-w-sm sm:max-w-md lg:max-w-none h-auto"
+                className="h-4/5 w-auto object-contain lg:h-auto lg:w-full lg:max-w-none"
                 onError={(e) => {
                   e.target.onerror = null;
                   e.target.src =
@@ -457,8 +451,8 @@ const Hero = () => {
             DESCRIPTION
             CLOSER TO THE COLUMNS + ONE SENTENCE PER LINE
         ======================================================= */}
-        <div className="relative z-20 w-full text-left text-base sm:text-lg md:text-xl text-gray-300 leading-relaxed font-ledger -mt-4 sm:-mt-8 lg:-mt-14 overflow-x-auto">
-          <div className="whitespace-nowrap">
+        <div className="relative z-20 w-full text-left text-base sm:text-lg md:text-xl text-gray-300 leading-relaxed font-ledger mt-2 sm:-mt-4 lg:-mt-14 lg:overflow-x-auto">
+          <div className="whitespace-normal lg:whitespace-nowrap">
             {renderTypedDescription()}
 
             {typedCount < TOTAL_TYPED_CHARS && (
