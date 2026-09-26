@@ -350,9 +350,9 @@ const About = () => {
                       src="/phone_on_bike.png"
                       alt="Phone mounted on a bike"
                       className="
-                        w-10
+                        w-16
                         sm:w-20
-                        h-10
+                        h-16
                         sm:h-20
                         object-contain
                         flex-shrink-0
@@ -385,9 +385,9 @@ const About = () => {
                       src="/phone_on_car2.png"
                       alt="Phone mounted in a car"
                       className="
-                        w-10
+                        w-16
                         sm:w-20
-                        h-10
+                        h-16
                         sm:h-20
                         object-contain
                         flex-shrink-0

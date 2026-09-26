@@ -9,9 +9,11 @@ import {
 } from "framer-motion";
 import { useEffect, useState, useRef, useCallback } from "react";
 
+import Lenis from "lenis";
 import Home from "./pages/Home";
 import WaitlistPage from "./pages/WaitlistPage";
 import MapPage from "./pages/MapPage";
+import Ellar from "./pages/Ellar";
 import "./styles/globals.css";
 import { Analytics } from "@vercel/analytics/react";
 
@@ -518,6 +520,14 @@ function AnimatedRoutes() {
             </PageWrapper>
           }
         />
+        <Route
+          path="/Ellar"
+          element={
+            <PageWrapper>
+              <Ellar />
+            </PageWrapper>
+          }
+        />
       </Routes>
     </AnimatePresence>
   );
@@ -562,13 +572,37 @@ function PageWrapper({ children }) {
  */
 
 function App() {
-  const [showSplash, setShowSplash] = useState(true);
+  const [showSplash, setShowSplash] = useState(() => {
+    // Show splash when the site is opened/reloaded directly.
+    // Internal navigation will not show it again.
+    return !window.__appAlreadyLoaded;
+  });
 
   const handleSplashComplete = useCallback(() => {
-    // let other components (e.g. Hero) know the splash is done
     window.__splashDone = true;
+    window.__appAlreadyLoaded = true;
+
     window.dispatchEvent(new Event("splash-complete"));
     setShowSplash(false);
+  }, []);
+
+  useEffect(() => {
+    const lenis = new Lenis({
+      duration: 1.8,
+      smoothWheel: true,
+      wheelMultiplier: 0.55,
+    });
+
+    function raf(time) {
+      lenis.raf(time);
+      requestAnimationFrame(raf);
+    }
+
+    requestAnimationFrame(raf);
+
+    return () => {
+      lenis.destroy();
+    };
   }, []);
 
   return (
