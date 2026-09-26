@@ -10,7 +10,15 @@ const MotionLink = motion(Link);
 const descriptionSegments = [
   {
     type: "text",
-    content: "Every road-defect you drive over will be put on the ",
+    content: "Every road-defect you drive over with our ",
+  },
+  {
+    type: "appLink",
+    content: "app",
+  },
+  {
+    type: "text",
+    content: " will be put on the ",
   },
   {
     type: "link",
@@ -76,7 +84,7 @@ const Hero = () => {
       setTypedCount(charIndex);
 
       if (charIndex < TOTAL_TYPED_CHARS) {
-        tickId = setTimeout(tick, 30);
+        tickId = setTimeout(tick, 25);
       }
     };
 
@@ -152,6 +160,22 @@ const Hero = () => {
           >
             {visibleText}
           </Link>
+        );
+      }
+      // --------------------------------------------------------
+      // APP LINK
+      // --------------------------------------------------------
+      if (seg.type === "appLink") {
+        output.push(
+          <a
+            key={i}
+            href="https://play.google.com/store/apps/details?id=com.vehnway.app&pcampaignid=web_share"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-purple-400 underline decoration-purple-400/50 hover:text-pink-400 hover:decoration-pink-400/50 transition-colors duration-300 cursor-pointer"
+          >
+            {visibleText}
+          </a>
         );
       }
 
@@ -382,7 +406,7 @@ const Hero = () => {
 
               {/* Third line */}
               <div className="font-ledger text-white text-2xl sm:text-3xl md:text-4xl lg:text-5xl xl:text-6xl 2xl:text-7xl">
-                you drive over
+                you drive over...
               </div>
             </motion.h1>
           </motion.div>

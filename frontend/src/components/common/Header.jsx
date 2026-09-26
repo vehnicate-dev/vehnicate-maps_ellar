@@ -4,9 +4,10 @@ import { motion } from 'framer-motion'
 import { Menu, X } from 'lucide-react'
 
 const NAVIGATION = [
-  { name: 'Home', href: '#home' },
-  { name: 'About', href: '#about' },
-  { name: 'Working', href: '#working' },
+  { name: 'What', href: '#home' },
+  { name: 'Why', href: '#why' },
+  { name: 'App', href: '#app' },
+  { name: 'Ellar', href: '#working' },
   { name: 'Contact', href: '#contact' },
 ]
 
