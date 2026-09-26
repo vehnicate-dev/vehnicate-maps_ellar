@@ -250,7 +250,7 @@ const About = () => {
                   whitespace-nowrap
                 "
               >
-                the vehnicate{" "}
+                the{" "}
                 <span className={gradientText}>
                   mobile app
                 </span>
@@ -344,29 +344,31 @@ const About = () => {
                   total={TOTAL_STEPS}
                   scrollYProgress={scrollYProgress}
                 >
-                  <div className="flex items-center justify-center gap-3 sm:gap-5">
+                  <div className="flex items-start justify-center gap-2 sm:gap-5">
                     {/* bike */}
                     <img
                       src="/phone_on_bike.png"
                       alt="Phone mounted on a bike"
                       className="
-                        w-16
+                        w-10
                         sm:w-20
-                        h-16
+                        h-10
                         sm:h-20
                         object-contain
                         flex-shrink-0
+                        -translate-y-4
+                        sm:translate-y--1
                       "
                     />
 
                     {/* number + question */}
-                    <div className="flex flex-col items-center text-gray-900">
+                    <div className="flex flex-col items-center text-gray-900 min-w-0">
                       <StepNumber n="02" />
 
                       <h3
                         className="
                           font-ledger
-                          text-xl
+                          text-lg
                           sm:text-2xl
                           font-semibold
                           leading-tight
@@ -380,15 +382,17 @@ const About = () => {
 
                     {/* car */}
                     <img
-                      src="/phone_on_car.png"
+                      src="/phone_on_car2.png"
                       alt="Phone mounted in a car"
                       className="
-                        w-16
+                        w-10
                         sm:w-20
-                        h-16
+                        h-10
                         sm:h-20
                         object-contain
                         flex-shrink-0
+                        -translate-y-4
+                        sm:translate-y--1
                       "
                     />
                   </div>

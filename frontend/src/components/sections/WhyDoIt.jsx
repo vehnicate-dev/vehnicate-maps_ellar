@@ -23,6 +23,7 @@ const WhyDoIt = () => {
     const wordInterval = setInterval(() => {
       setCurrentWordIndex((prev) => (prev + 1) % rotatingWords.length);
     }, 2500);
+
     return () => clearInterval(wordInterval);
   }, []);
 
@@ -38,7 +39,8 @@ const WhyDoIt = () => {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10 w-full">
-        <div className="w-full text-center lg:text-left space-y-6 sm:space-y-8">
+        <div className="w-full text-left space-y-6 sm:space-y-8">
+
           {/* Heading */}
           <div className="inline-block">
             <motion.h2
@@ -66,7 +68,7 @@ const WhyDoIt = () => {
               <div className="ml-1.5 w-1.5 h-1.5 rounded-full bg-white/70" />
             </div>
           </div>
-          
+
           {/* Copy */}
           <div className="font-ledger text-gray-300 leading-relaxed w-full">
             <motion.div
@@ -76,17 +78,34 @@ const WhyDoIt = () => {
               viewport={{ once: true }}
               className="text-lg sm:text-xl lg:text-2xl xl:text-3xl"
             >
-              <div>Somewhere out there, there's someone waiting for their</div>
+              <div>
+                Somewhere out there, there's someone waiting for their
+              </div>
 
               <div className="relative h-[1.3em] sm:h-[1.4em] overflow-hidden my-1 sm:my-2">
                 <AnimatePresence mode="wait">
                   <motion.span
                     key={currentWordIndex}
-                    initial={{ opacity: 0, y: 20, filter: "blur(4px)" }}
-                    animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-                    exit={{ opacity: 0, y: -20, filter: "blur(4px)" }}
-                    transition={{ duration: 0.6, ease: [0.25, 0.46, 0.45, 0.94] }}
-                    className={`${gradientText} font-semibold absolute inset-0 flex items-center justify-center lg:justify-start whitespace-nowrap text-2xl sm:text-3xl lg:text-4xl xl:text-5xl`}
+                    initial={{
+                      opacity: 0,
+                      y: 20,
+                      filter: "blur(4px)",
+                    }}
+                    animate={{
+                      opacity: 1,
+                      y: 0,
+                      filter: "blur(0px)",
+                    }}
+                    exit={{
+                      opacity: 0,
+                      y: -20,
+                      filter: "blur(4px)",
+                    }}
+                    transition={{
+                      duration: 0.6,
+                      ease: [0.25, 0.46, 0.45, 0.94],
+                    }}
+                    className={`${gradientText} font-semibold absolute inset-0 flex items-center justify-start whitespace-nowrap text-2xl sm:text-3xl lg:text-4xl xl:text-5xl`}
                   >
                     {rotatingWords[currentWordIndex]}
                   </motion.span>
