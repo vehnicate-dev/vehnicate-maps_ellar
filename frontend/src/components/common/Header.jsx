@@ -1,13 +1,15 @@
-
 import React, { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { Menu, X } from 'lucide-react'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 const NAVIGATION = [
   { name: 'What', href: '#home' },
   { name: 'Why', href: '#why' },
   { name: 'App', href: '#app' },
-  { name: 'Ellar', href: '#working' },
+  { name: 'Ellar', href: '#ellar' },
+  { name: 'vMN', href: '#vmn' },
+  { name: 'Map', href: '#maps' },
   { name: 'Contact', href: '#contact' },
 ]
 
@@ -18,6 +20,9 @@ const TIMES_FONT = {
 const Header = () => {
   const [isScrolled, setIsScrolled] = useState(false)
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
+
+  const location = useLocation()
+  const navigate = useNavigate()
 
   useEffect(() => {
     const handleScroll = () => {
@@ -31,16 +36,73 @@ const Header = () => {
     }
   }, [])
 
+  /*
+   * ============================================================
+   * NAVIGATION
+   * ============================================================
+   *
+   * If already on Home:
+   *     Smoothly scroll to the requested section.
+   *
+   * If on another page:
+   *     Navigate to Home first, then scroll to the section.
+   */
+
   const scrollToSection = (href) => {
-    const element = document.querySelector(href)
+    setIsMobileMenuOpen(false)
 
-    if (element) {
-      element.scrollIntoView({
-        behavior: 'smooth',
-      })
+    const scrollToElement = () => {
+      const element = document.querySelector(href)
 
-      setIsMobileMenuOpen(false)
+      if (!element) return
+
+      const offset = href === '#ellar' ? -120 : href === '#why' ? -80 : 0
+
+      /*
+       * Use the global Lenis instance created in App.jsx.
+       *
+       * This gives header navigation the exact same smooth
+       * scrolling behavior as normal page scrolling.
+       */
+
+      if (window.__lenis) {
+        window.__lenis.scrollTo(element, {
+          offset,
+          duration: 1.4,
+        })
+      } else {
+        /*
+         * Fallback in case Lenis isn't available yet.
+         */
+
+        window.scrollTo({
+          top: element.getBoundingClientRect().top + window.scrollY + offset,
+          behavior: 'smooth',
+        })
+      }
     }
+
+    /*
+     * Already on Home
+     */
+
+    if (location.pathname === '/') {
+      scrollToElement()
+      return
+    }
+
+    /*
+     * Coming from another page.
+     *
+     * Navigate to Home first, then wait briefly for the Home
+     * component to mount before finding the section.
+     */
+
+    navigate('/')
+
+    setTimeout(() => {
+      scrollToElement()
+    }, 100)
   }
 
   return (
@@ -55,6 +117,7 @@ const Header = () => {
     >
 
       {/* BACKGROUND PATCHES FOR HEADER */}
+
       {isScrolled && (
         <div className="absolute inset-0 overflow-hidden pointer-events-none">
 
@@ -70,6 +133,7 @@ const Header = () => {
         <div className="flex items-center justify-between h-14 sm:h-16">
 
           {/* BRAND */}
+
           <motion.div
             id="header-brand"
             whileTap={{ scale: 0.95 }}
@@ -91,6 +155,7 @@ const Header = () => {
             {/* IMPORTANT:
                 This is the exact wordmark that the splash targets.
             */}
+
             <motion.span
               id="header-wordmark"
               className="text-xl sm:text-2xl md:text-3xl text-white"
@@ -103,6 +168,7 @@ const Header = () => {
 
 
           {/* DESKTOP NAVIGATION */}
+
           <div className="hidden md:block">
 
             <div
@@ -171,6 +237,7 @@ const Header = () => {
 
 
           {/* MOBILE MENU BUTTON */}
+
           <div className="md:hidden">
 
             <motion.button
@@ -225,6 +292,7 @@ const Header = () => {
 
 
         {/* MOBILE NAVIGATION */}
+
         <motion.div
           initial={{
             opacity: 0,
@@ -326,6 +394,7 @@ const Header = () => {
 
 
               {/* MOBILE FOOTER WORDMARK */}
+
               <motion.div
                 className="pt-3 sm:pt-4 mt-3 sm:mt-4 border-t border-white/10"
 
@@ -369,4 +438,3 @@ const Header = () => {
 }
 
 export default Header
-

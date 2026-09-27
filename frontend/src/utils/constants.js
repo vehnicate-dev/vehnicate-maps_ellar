@@ -5,7 +5,7 @@ export const COMPANY_INFO = {
   social: {
     linkedin: 'https://linkedin.com/company/vehnicate', // Replace with your actual LinkedIn
     instagram: 'https://instagram.com/vehnicate', // Replace with your actual Instagram
-    email: 'vehnicate.web@gmail.com'
+    email: 'vehnicate@gmail.com'
   }
 }
 

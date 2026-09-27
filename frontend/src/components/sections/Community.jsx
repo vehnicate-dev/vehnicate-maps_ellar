@@ -264,9 +264,18 @@ const Community = () => {
                 <motion.button
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
+                  onClick={() => {
+                    const contact = document.querySelector('#contact')
+                    if (!contact) return
+                    if (window.__lenis) {
+                      window.__lenis.scrollTo(contact, { offset: 0, duration: 1.4 })
+                    } else {
+                      contact.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                    }
+                  }}
                   className="w-full sm:w-auto px-4 sm:px-6 py-2.5 sm:py-3 bg-gradient-to-r from-purple-600 to-pink-600 text-white font-semibold text-sm sm:text-base rounded-lg sm:rounded-xl shadow-lg hover:shadow-2xl transition-all duration-300 flex items-center justify-center group"
                 >
-                  Join Waitlist
+                  Contact Us
                   <ChevronRight className="ml-2 group-hover:translate-x-1 transition-transform" size={16} />
                 </motion.button>
                 

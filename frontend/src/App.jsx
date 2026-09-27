@@ -7,13 +7,13 @@ import {
   useTransform,
   animate,
 } from "framer-motion";
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useLayoutEffect, useState, useRef, useCallback } from "react";
 
 import Lenis from "lenis";
 import Home from "./pages/Home";
-import WaitlistPage from "./pages/WaitlistPage";
 import MapPage from "./pages/MapPage";
 import Ellar from "./pages/Ellar";
+import VmnPage from "./pages/VmnPage";
 import "./styles/globals.css";
 import { Analytics } from "@vercel/analytics/react";
 
@@ -504,15 +504,6 @@ function AnimatedRoutes() {
         />
 
         <Route
-          path="/waitlist"
-          element={
-            <PageWrapper>
-              <WaitlistPage />
-            </PageWrapper>
-          }
-        />
-
-        <Route
           path="/map"
           element={
             <PageWrapper>
@@ -521,10 +512,19 @@ function AnimatedRoutes() {
           }
         />
         <Route
-          path="/Ellar"
+          path="/ellar"
           element={
             <PageWrapper>
               <Ellar />
+            </PageWrapper>
+          }
+        />
+
+        <Route
+          path="/vmn"
+          element={
+            <PageWrapper>
+              <VmnPage />
             </PageWrapper>
           }
         />
@@ -540,6 +540,18 @@ function AnimatedRoutes() {
  */
 
 function PageWrapper({ children }) {
+  const location = useLocation();
+
+  useLayoutEffect(() => {
+    if (location.pathname === "/" && location.state?.scrollToSection) return;
+
+    if (window.__lenis) {
+      window.__lenis.scrollTo(0, { immediate: true });
+    } else {
+      window.scrollTo(0, 0);
+    }
+  }, [location.key, location.pathname, location.state]);
+
   return (
     <motion.div
       initial={{
@@ -592,16 +604,20 @@ function App() {
       smoothWheel: true,
       wheelMultiplier: 0.55,
     });
+    window.__lenis = lenis;
 
+    let animationFrame;
     function raf(time) {
       lenis.raf(time);
-      requestAnimationFrame(raf);
+      animationFrame = requestAnimationFrame(raf);
     }
 
-    requestAnimationFrame(raf);
+    animationFrame = requestAnimationFrame(raf);
 
     return () => {
+      cancelAnimationFrame(animationFrame);
       lenis.destroy();
+      if (window.__lenis === lenis) delete window.__lenis;
     };
   }, []);
 

@@ -1,33 +1,10 @@
 import React from 'react'
 import { motion } from 'framer-motion'
-import { Linkedin, Instagram, Mail, MapPin, Phone, ArrowUp, Heart } from 'lucide-react'
-import { COMPANY_INFO, NAVIGATION } from '../../utils/constants' // Assuming NAVIGATION is available for consistency
+import { Linkedin, Instagram, Mail, ArrowUp, Heart } from 'lucide-react'
+import { COMPANY_INFO } from '../../utils/constants'
 
 const Footer = () => {
   const currentYear = new Date().getFullYear()
-
-  // Re-using the navigation constants for consistency if they match
-  const footerLinks = {
-    company: [
-      { name: 'About Us', href: '#about' },
-      { name: 'How It Works', href: '#working' },
-    ],
-    product: [
-      { name: 'vehnicate App', href: 'waitlist' },
-      { name: 'RPS System', href: '#' },
-    ],
-  }
-
-  const scrollToSection = (href) => {
-    if (href.startsWith('#')) {
-      const element = document.querySelector(href)
-      if (element) {
-        element.scrollIntoView({ behavior: 'smooth' })
-      }
-    } else {
-      window.open(href, '_blank', 'noopener,noreferrer')
-    }
-  }
 
   const scrollToTop = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -57,8 +34,7 @@ const Footer = () => {
 
         >
           <h2 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl xl:text-7xl 2xl:text-8xl font-ledger font-bold mb-4 sm:mb-6 text-white leading-tight">
-            Finding the <span className="bg-gradient-to-r from-purple-400 to-pink-500 bg-clip-text text-transparent "> calm </span> <br className="hidden sm:block" />
-            <span className="sm:hidden"> </span>in the chaos
+            doing good is <span className="bg-gradient-to-r from-purple-400 to-pink-500 bg-clip-text text-transparent">profitable.</span>
           </h2>
         </motion.div>
 
@@ -70,18 +46,38 @@ const Footer = () => {
           viewport={{ once: true }}
           className="bg-gray-900/40 backdrop-blur-lg rounded-2xl sm:rounded-3xl border border-white/10 p-6 sm:p-8 md:p-12 mb-8 sm:mb-12"
         >
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-8 sm:gap-10 lg:gap-12">
-            {/* Company Info */}
-            <div className="lg:col-span-2">
+          <div className="grid grid-cols-1 items-center gap-8 sm:gap-10 md:grid-cols-[1fr_1px_1fr] lg:gap-12">
+            <div className="text-left">
+              <h3 className="font-ledger text-2xl font-bold text-white sm:text-3xl">
+                Ahoy!
+              </h3>
+              <p className="mt-4 max-w-md text-sm leading-relaxed text-gray-300 sm:text-base">
+                Always remember, there&apos;s a home waiting for you and the
+                others - we will be waiting for your next visit too!
+              </p>
+              <p className="mt-5 text-sm font-medium leading-relaxed text-white sm:text-base">
+                Safe &amp; happy driving,
+                <br />
+                with <span className="text-pink-400">🩷</span>, vehnicate.
+              </p>
+            </div>
+
+            <div
+              aria-hidden="true"
+              className="h-px w-full bg-white/15 md:h-full md:w-px"
+            />
+
+            <div className="text-left md:text-right">
               <div className="mb-4 sm:mb-6">
-                <h3 className="font-ledger text-2xl sm:text-3xl font-bold text-white mb-3 sm:mb-4">
+                <h3 className="mb-3 font-ledger text-2xl font-bold text-white sm:mb-4 sm:text-3xl">
                   vehnicate
                 </h3>
-                <p className="text-sm sm:text-base text-gray-400 leading-relaxed max-w-md">
-                  Building a gamified ecosystem that rewards safe and efficient driving, powered by cutting-edge data analytics.
+                <p className="ml-auto max-w-md text-sm leading-relaxed text-gray-400 sm:text-base">
+                  Building a gamified ecosystem that rewards being a good road
+                  mate.
                 </p>
               </div>
-              <div className="flex space-x-2 sm:space-x-3">
+              <div className="flex space-x-2 sm:space-x-3 md:justify-end">
                 <motion.a 
                   whileHover={{ scale: 1.1, y: -2 }} 
                   whileTap={{ scale: 0.9 }} 
@@ -113,27 +109,6 @@ const Footer = () => {
               </div>
             </div>
 
-            {/* Link Sections */}
-            {Object.entries(footerLinks).map(([category, links]) => (
-              <div key={category}>
-                <h4 className="font-ledger text-base sm:text-lg font-semibold text-white mb-4 sm:mb-6 capitalize relative">
-                  {category}
-                  <div className="absolute -bottom-1 sm:-bottom-2 left-0 w-6 sm:w-8 h-0.5 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full"></div>
-                </h4>
-                <ul className="space-y-2 sm:space-y-3">
-                  {links.map((link) => (
-                    <li key={link.name}>
-                      <button
-                        onClick={() => scrollToSection(link.href)}
-                        className="text-sm sm:text-base text-gray-400 transition-all duration-300 font-medium hover:bg-gradient-to-r hover:from-purple-400 hover:to-pink-500 hover:bg-clip-text hover:text-transparent text-left"
-                      >
-                        {link.name}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
           </div>
         </motion.div>
 

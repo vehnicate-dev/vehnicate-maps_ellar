@@ -1,13 +1,16 @@
 import React from "react";
 import { motion } from "framer-motion";
+import MinimalPageHeader from "../components/common/MinimalPageHeader";
 
 const gradientText =
   "bg-gradient-to-r from-purple-400 via-pink-500 to-purple-400 bg-clip-text text-transparent";
 
 const Ellar = () => {
   return (
-    <section
-      className="
+    <div className="min-h-screen bg-black text-white">
+      <MinimalPageHeader backToSection="ellar" />
+      <section
+        className="
         min-h-screen
         bg-gradient-to-b
         from-black
@@ -19,7 +22,7 @@ const Ellar = () => {
         sm:py-16
         md:py-20
       "
-    >
+      >
       {/* Background glow */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div
@@ -181,7 +184,8 @@ const Ellar = () => {
           </div>
         </div>
       </div>
-    </section>
+      </section>
+    </div>
   );
 };
 

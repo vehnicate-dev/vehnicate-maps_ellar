@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { motion } from "framer-motion";
-import { Mail, Phone, Send, CheckCircle, Linkedin, AlertCircle } from "lucide-react";
+import { Send, CheckCircle, Linkedin, Youtube, Instagram, AlertCircle } from "lucide-react";
 import emailjs from '@emailjs/browser';
 
 // Fixed Card component with proper z-index
@@ -29,10 +29,10 @@ const Contact = () => {
 
   // Your EmailJS config
   const EMAILJS_CONFIG = {
-    serviceId: 'service_3v3d3sz',
-    adminTemplateId: 'template_7mdmioc',
+    serviceId: 'service_i5vdppj',
+    adminTemplateId: 'template_jskmwuo',
     replyTemplateId: 'template_ccysqje',
-    publicKey: 'XKRZgZZpyV7zxyZNe'
+    publicKey: 'byPA5VI8P9ziKUl2h'
   };
 
   const handleChange = (e) => {
@@ -55,20 +55,32 @@ const Contact = () => {
         subject: formData.subject,
         message: formData.message,
       };
+      const adminTemplateParams = {
+        ...templateParams,
+        to_email: "vehnicate@gmail.com",
+        reply_to: formData.email,
+      };
 
       await emailjs.send(
         EMAILJS_CONFIG.serviceId,
         EMAILJS_CONFIG.adminTemplateId,
-        templateParams,
+        adminTemplateParams,
         EMAILJS_CONFIG.publicKey
       );
 
-      await emailjs.send(
-        EMAILJS_CONFIG.serviceId,
-        EMAILJS_CONFIG.replyTemplateId,
-        templateParams,
-        EMAILJS_CONFIG.publicKey
-      );
+      try {
+        await emailjs.send(
+          EMAILJS_CONFIG.serviceId,
+          EMAILJS_CONFIG.replyTemplateId,
+          {
+            ...templateParams,
+            to_email: formData.email,
+          },
+          EMAILJS_CONFIG.publicKey
+        );
+      } catch (replyError) {
+        console.warn('Auto-reply email failed:', replyError);
+      }
 
       console.log('Both emails sent successfully!');
       setIsSubmitted(true);
@@ -80,7 +92,12 @@ const Contact = () => {
 
     } catch (error) {
       console.error('EmailJS Error:', error);
-      setError('Failed to send message. Please try again or contact us directly.');
+      const providerMessage = error?.text || error?.message;
+      setError(
+        providerMessage
+          ? `Failed to send message: ${providerMessage}`
+          : 'Failed to send message. Please try again or contact us directly.'
+      );
     } finally {
       setIsLoading(false);
     }
@@ -88,22 +105,19 @@ const Contact = () => {
 
   const contactInfo = [
     {
-      icon: <Mail className="w-5 h-5 sm:w-6 sm:h-6 lg:w-8 lg:h-8" />,
-      title: "Email Us",
-      details: "vehnicate.web@gmail.com",
-      action: "mailto:vehnicate.web@gmail.com",
-    },
-    {
-      icon: <Phone className="w-5 h-5 sm:w-6 sm:h-6 lg:w-8 lg:h-8" />,
-      title: "Call Us",
-      details: "+91 77081 61551",
-      action: "tel:+917708161551",
-    },
-    {
       icon: <Linkedin className="w-5 h-5 sm:w-6 sm:h-6 lg:w-8 lg:h-8" />,
-      title: "Connect via LinkedIn",
-      details: "",
+      title: "LinkedIn",
       action: "https://www.linkedin.com/company/vehnicate/",
+    },
+    {
+      icon: <Youtube className="w-5 h-5 sm:w-6 sm:h-6 lg:w-8 lg:h-8" />,
+      title: "YouTube",
+      action: "https://www.youtube.com/channel/UCrgjnbIM-6sNmaLem3Qmntg",
+    },
+    {
+      icon: <Instagram className="w-5 h-5 sm:w-6 sm:h-6 lg:w-8 lg:h-8" />,
+      title: "Instagram",
+      action: "https://www.instagram.com/vehnicate/",
     },
   ];
 
@@ -166,7 +180,12 @@ const Contact = () => {
                   viewport={{ once: true }}
                   className="group"
                 >
-                  <a href={info.action} className="block">
+                  <a
+                    href={info.action}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block"
+                  >
                     <Card className="group hover:scale-[1.03] transition-transform duration-500">
                       <div className="relative p-4 sm:p-6">
                         <div className="absolute -top-4 sm:-top-6 left-4 sm:left-6 w-12 h-12 sm:w-14 sm:h-14 lg:w-16 lg:h-16 bg-gradient-to-br from-purple-600 to-pink-600 rounded-xl sm:rounded-2xl flex items-center justify-center shadow-xl shadow-purple-500/30 transform group-hover:rotate-6 group-hover:scale-110 transition-all duration-500 z-20">
