@@ -1,9 +1,11 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import MinimalPageHeader from "../components/common/MinimalPageHeader";
 
 const gradientText =
   "bg-gradient-to-r from-purple-400 via-pink-500 to-purple-400 bg-clip-text text-transparent";
+const ELLAR_TOTALS_URL =
+  "https://vehnicate-mapsellar-production.up.railway.app/public/ellar-totals";
 
 const Formula = ({ children }) => (
   <div className="my-6 overflow-x-auto rounded border border-white/10 bg-white/[0.03] px-4 py-5 text-center font-ledger text-lg text-white sm:text-xl">
@@ -12,6 +14,32 @@ const Formula = ({ children }) => (
 );
 
 const Ellar = () => {
+  const [ellarTotals, setEllarTotals] = useState(null);
+
+  useEffect(() => {
+    let isActive = true;
+
+    const fetchEllarTotals = async () => {
+      try {
+        const response = await fetch(ELLAR_TOTALS_URL);
+        if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+
+        const totals = await response.json();
+        if (isActive) setEllarTotals(totals);
+      } catch (error) {
+        if (isActive) console.error("[ellar-totals] request failed:", error);
+      }
+    };
+
+    fetchEllarTotals();
+    const interval = window.setInterval(fetchEllarTotals, 60_000);
+
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
   return (
     <div className="min-h-screen bg-black text-white">
       <MinimalPageHeader backToSection="ellar" />
@@ -19,6 +47,37 @@ const Ellar = () => {
         className="relative overflow-hidden bg-gradient-to-b from-black via-purple-900/5 to-black py-12 sm:py-16 md:py-20"
       >
         <div className="relative z-10 mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <section
+            aria-label="Total Ellars issued"
+            aria-live="polite"
+            className="mb-12 border-y border-white/15 py-5 text-center sm:mb-16"
+          >
+            <p className="font-ledger text-sm font-semibold text-white sm:text-base">
+              total issued ellars:
+            </p>
+            <div className="mt-3 flex flex-col items-center justify-center gap-2 font-ledger text-base text-gray-300 sm:flex-row sm:gap-8 sm:text-lg">
+              <p>
+                <span className="mr-2 font-semibold text-white">
+                  {ellarTotals
+                    ? Number(ellarTotals.frozen_ellar || 0).toFixed(2)
+                    : "--.--"}
+                </span>
+                Frozen Ellars
+              </p>
+              <span aria-hidden="true" className="hidden text-white/50 sm:inline">
+                |
+              </span>
+              <p>
+                <span className="mr-2 font-semibold text-white">
+                  {ellarTotals
+                    ? Number(ellarTotals.liquid_ellar || 0).toFixed(2)
+                    : "--.--"}
+                </span>
+                Liquid Ellars
+              </p>
+            </div>
+          </section>
+
           <motion.header
             initial={{ opacity: 0, y: 24 }}
             animate={{ opacity: 1, y: 0 }}

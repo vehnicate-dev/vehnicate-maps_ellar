@@ -666,7 +666,7 @@ const VMN = ({ diagramOnly = false }) => {
             <p className="font-ledger text-sm leading-[1.7] text-white/65">
               Customers prefer this grocer over his competitors
               because he accepts Ellars. This helps the grocer
-              drive more foot-traffic and build customer
+              drive more foot fall and build customer
               relationships without having to pour money into ads.
             </p>
 

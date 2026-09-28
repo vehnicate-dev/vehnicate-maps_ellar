@@ -134,12 +134,13 @@ const Header = () => {
 
           {/* BRAND */}
 
-          <motion.div
-            id="header-brand"
-            whileTap={{ scale: 0.95 }}
-            className="flex items-center cursor-pointer"
-            onClick={() => scrollToSection('#home')}
-          >
+          <div className="flex min-w-0 items-center">
+            <motion.div
+              id="header-brand"
+              whileTap={{ scale: 0.95 }}
+              className="flex shrink-0 cursor-pointer items-center"
+              onClick={() => scrollToSection('#home')}
+            >
 
             <img
               src="/hn-logo_light.png"
@@ -164,7 +165,9 @@ const Header = () => {
               vehnicate
             </motion.span>
 
-          </motion.div>
+            </motion.div>
+
+          </div>
 
 
           {/* DESKTOP NAVIGATION */}
@@ -289,7 +292,6 @@ const Header = () => {
           </div>
 
         </div>
-
 
         {/* MOBILE NAVIGATION */}
 

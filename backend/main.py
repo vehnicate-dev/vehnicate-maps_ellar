@@ -1,4 +1,5 @@
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
@@ -89,6 +90,16 @@ MIN_COHERENCE = 0.1  # su,sv vector magnitude / energy — below this, the direc
 MIN_GPS_POINTS = 10  # fewer raw GPS fixes than this → too sparse to trust map-matching/distance/Aliv
 MIN_TRIP_DISTANCE_M = 50  # trips that moved less than this overall aren't worth map-matching/Aliv
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://vehnicate.com",
+        "https://www.vehnicate.com",
+        "http://localhost:5173",
+    ],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
 
 # ── Single-worker trip queue ─────────────────────────────────────────────────
@@ -792,6 +803,43 @@ def Aliv_for_MVP1(payload: WebhookPayload):
         session.end_time,
     ))
     return {"status": "received"}
+
+
+@app.get("/public/ellar-totals")
+def get_public_ellar_totals():
+    if not TARGET_URL or not TARGET_KEY:
+        raise HTTPException(status_code=503, detail="Ellar totals are unavailable")
+
+    totals = {"frozen_ellar": 0.0, "liquid_ellar": 0.0}
+    page_size = 1000
+    start = 0
+
+    try:
+        supabase_target = _make_supabase_client(TARGET_URL, TARGET_KEY)
+        while True:
+            response = _execute_with_retry(
+                supabase_target.table("user_details")
+                .select("frozen_ellar, liquid_ellar")
+                .range(start, start + page_size - 1)
+            )
+            rows = response.data or []
+
+            for row in rows:
+                for column in totals:
+                    value = row.get(column)
+                    if value is not None:
+                        amount = float(value)
+                        if math.isfinite(amount):
+                            totals[column] += amount
+
+            if len(rows) < page_size:
+                break
+            start += page_size
+    except Exception as err:
+        print(f"[ellar-totals] failed to sum user_details: {err}")
+        raise HTTPException(status_code=502, detail="Unable to retrieve Ellar totals") from err
+
+    return totals
 
 
 # ── Full-pipeline replay ─────────────────────────────────────────────────────

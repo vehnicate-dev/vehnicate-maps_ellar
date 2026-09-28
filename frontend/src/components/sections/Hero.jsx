@@ -1,8 +1,104 @@
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "react-router-dom";
+import { supabase } from "../../utils/supabase";
 
 const MotionLink = motion(Link);
+const PAGE_SIZE = 1000;
+const REFRESH_INTERVAL_MS = 60_000;
+const DIGIT_SEGMENTS = {
+  0: ["a", "b", "c", "d", "e", "f"],
+  1: ["b", "c"],
+  2: ["a", "b", "g", "e", "d"],
+  3: ["a", "b", "g", "c", "d"],
+  4: ["f", "g", "b", "c"],
+  5: ["a", "f", "g", "c", "d"],
+  6: ["a", "f", "g", "e", "c", "d"],
+  7: ["a", "b", "c"],
+  8: ["a", "b", "c", "d", "e", "f", "g"],
+  9: ["a", "b", "c", "d", "f", "g"],
+  "-": ["g"],
+};
+const SEGMENT_PATHS = {
+  a: "M6 2 H22 L25 5 L22 8 H6 L3 5 Z",
+  b: "M22 9 L25 12 V22 L22 25 L19 22 V12 Z",
+  c: "M22 25 L25 28 V38 L22 41 L19 38 V28 Z",
+  d: "M6 42 H22 L25 45 L22 48 H6 L3 45 Z",
+  e: "M3 28 L6 25 L9 28 V38 L6 41 L3 38 Z",
+  f: "M3 12 L6 9 L9 12 V22 L6 25 L3 22 Z",
+  g: "M6 22 H22 L25 25 L22 28 H6 L3 25 Z",
+};
+
+async function fetchAllRows(query) {
+  const rows = [];
+
+  for (let start = 0; ; start += PAGE_SIZE) {
+    const { data, error } = await query().range(start, start + PAGE_SIZE - 1);
+    if (error) throw error;
+
+    rows.push(...(data || []));
+    if (!data || data.length < PAGE_SIZE) return rows;
+  }
+}
+
+const SevenSegmentNumber = ({ value }) => (
+  <span className="inline-flex items-center gap-px" aria-hidden="true">
+    {String(value).split("").map((character, index) => {
+      if (character === ".") {
+        return (
+          <span
+            key={`${character}-${index}`}
+            className="mx-0.5 mb-1 h-1 w-1 self-end rounded-full bg-white"
+          />
+        );
+      }
+
+      return (
+        <svg
+          key={`${character}-${index}`}
+          viewBox="0 0 28 50"
+          className="h-7 w-4 sm:h-8 sm:w-[18px]"
+          focusable="false"
+        >
+          {Object.entries(SEGMENT_PATHS)
+            .filter(([segment]) => DIGIT_SEGMENTS[character]?.includes(segment))
+            .map(([segment, path]) => (
+              <path
+                key={segment}
+                d={path}
+                fill="#ffffff"
+                style={{ filter: "drop-shadow(0 0 3px rgba(255,255,255,0.55))" }}
+              />
+            ))}
+        </svg>
+      );
+    })}
+  </span>
+);
+
+const HeroMetrics = ({ totalDistance, totalDriveMinutes }) => {
+  const distanceValue = totalDistance === null ? "--.--" : totalDistance.toFixed(2);
+  const driveTimeValue = totalDriveMinutes === null ? "---" : String(totalDriveMinutes);
+
+  return (
+    <div className="whitespace-nowrap text-center text-white" aria-live="polite">
+      <p className="mb-1 font-ledger text-xs text-white sm:text-sm">
+        users on vehnicate have so far clocked:
+      </p>
+              <div className="flex items-center justify-center gap-5 sm:gap-8">
+        <span className="flex items-center gap-1.5" role="img" aria-label={`${distanceValue} km`}>
+          <SevenSegmentNumber value={distanceValue} />
+          <span className="bg-gradient-to-r from-purple-300 via-pink-400 to-purple-300 bg-clip-text font-sans text-base font-bold text-transparent sm:text-lg">km</span>
+        </span>
+        <span aria-hidden="true" className="text-sm text-white">|</span>
+        <span className="flex items-center gap-1.5" role="img" aria-label={`${driveTimeValue} min`}>
+          <SevenSegmentNumber value={driveTimeValue} />
+          <span className="bg-gradient-to-r from-purple-300 via-pink-400 to-purple-300 bg-clip-text font-sans text-base font-bold text-transparent sm:text-lg">min</span>
+        </span>
+      </div>
+    </div>
+  );
+};
 
 // ============================================================
 // DESCRIPTION SEGMENTS
@@ -55,8 +151,54 @@ const TOTAL_TYPED_CHARS = descriptionSegments.reduce(
 const Hero = () => {
   const [currentWordIndex, setCurrentWordIndex] = useState(0);
   const [typedCount, setTypedCount] = useState(0);
+  const [totalDistance, setTotalDistance] = useState(null);
+  const [totalDriveMinutes, setTotalDriveMinutes] = useState(null);
 
   const rotatingWords = ["pothole", "speedbreaker"];
+
+  useEffect(() => {
+    let isActive = true;
+
+    const refreshTotals = async () => {
+      try {
+        const sessions = await fetchAllRows(() =>
+          supabase
+            .from("sessions")
+            .select("distance, start_time, end_time")
+            .neq("distance", 0)
+        );
+        if (!isActive) return;
+
+        const totals = sessions.reduce(
+          (sum, session) => {
+            const distance = Number(session.distance);
+            if (Number.isFinite(distance)) sum.distance += distance;
+
+            const start = Date.parse(session.start_time);
+            const end = Date.parse(session.end_time);
+            if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+              sum.durationMs += end - start;
+            }
+            return sum;
+          },
+          { distance: 0, durationMs: 0 }
+        );
+
+        setTotalDistance(totals.distance);
+        setTotalDriveMinutes(Math.round(totals.durationMs / 60_000));
+      } catch (error) {
+        if (isActive) console.error("[supabase] hero session totals:", error);
+      }
+    };
+
+    refreshTotals();
+    const interval = window.setInterval(refreshTotals, REFRESH_INTERVAL_MS);
+
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+    };
+  }, []);
 
   // ============================================================
   // ROTATING POTHOLE / SPEEDBREAKER TEXT
@@ -414,7 +556,15 @@ const Hero = () => {
           {/* ====================================================
               RIGHT SIDE - IMAGE
           ===================================================== */}
-          <div className="w-full lg:w-1/2 flex justify-center items-center relative max-w-md sm:max-w-lg lg:max-w-none -mt-2 lg:mt-0">
+          <div className="relative -mt-2 flex w-full max-w-md flex-col items-center sm:max-w-lg lg:mt-0 lg:w-1/2 lg:max-w-none">
+            <div className="mb-3 sm:mb-4">
+              <HeroMetrics
+                totalDistance={totalDistance}
+                totalDriveMinutes={totalDriveMinutes}
+              />
+            </div>
+
+            <div className="relative flex w-full justify-center">
 
             {/* Base Image */}
             <motion.div
@@ -468,6 +618,7 @@ const Hero = () => {
                 }}
               />
             </motion.div>
+            </div>
           </div>
         </div>
 
@@ -475,7 +626,7 @@ const Hero = () => {
             DESCRIPTION
             CLOSER TO THE COLUMNS + ONE SENTENCE PER LINE
         ======================================================= */}
-        <div className="relative z-20 w-full text-left text-base sm:text-lg md:text-xl text-gray-300 leading-relaxed font-ledger mt-2 sm:-mt-4 lg:-mt-14 lg:overflow-x-auto">
+        <div className="relative z-20 mt-0 w-full text-left font-ledger text-base leading-relaxed text-gray-300 sm:-mt-6 sm:text-lg md:text-xl lg:-mt-28 lg:overflow-x-auto">
           <div className="whitespace-normal lg:whitespace-nowrap">
             {renderTypedDescription()}
 

@@ -2,16 +2,10 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import * as h3 from "h3-js";
-import { createClient } from "@supabase/supabase-js";
 import "@luomus/leaflet-smooth-wheel-zoom";
 import "leaflet-doubletapdrag";
 import "leaflet-doubletapdragzoom";
-
-// ─── Supabase config ──────────────────────────────────────────────────────────
-const SUPABASE_URL = "https://mmjusghgeedycrrfdejg.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_unNgZxi4yyID9qAAy3d2dg_dGJLpv3N";
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+import { supabase } from "../../utils/supabase";
 
 const H3_RES = 9;
 const CITIES = ["Chennai", "Surat", "Bangalore", "Mumbai", "Hyderabad", "Pune", "Kolkata"];
