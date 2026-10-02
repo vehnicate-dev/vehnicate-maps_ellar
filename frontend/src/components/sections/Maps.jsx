@@ -28,6 +28,7 @@ const Maps = () => {
   }, []);
 
   return (
+    <>
     <section
       id="maps"
       ref={sectionRef}
@@ -82,8 +83,35 @@ const Maps = () => {
             aria-label="Preview of the road defects map"
           />
         </div>
+
       </div>
     </section>
+    <section className="bg-black pb-16 sm:pb-20 lg:pb-24">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+        <div className="mx-auto w-full max-w-5xl border-t border-white/70 pt-8 sm:pt-10">
+          <h2 className="text-center font-ledger text-3xl font-semibold text-white sm:text-4xl">
+            What to{" "}
+            <span className="bg-gradient-to-r from-purple-400 via-pink-500 to-purple-400 bg-clip-text text-transparent">
+              explore
+            </span>{" "}
+            next:
+          </h2>
+          <ul className="mt-4 list-disc space-y-12 pl-6 font-ledger text-base text-gray-300 sm:text-lg">
+            <li>
+              <Link className="underline underline-offset-4 transition-colors hover:text-white" to="/vmn">
+                Learn more about the vehnicate Merchant Network.
+              </Link>
+            </li>
+            <li>
+              <Link className="underline underline-offset-4 transition-colors hover:text-white" to="/ellar">
+                Learn more about the working of the Ellar.
+              </Link>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </section>
+    </>
   );
 };
 

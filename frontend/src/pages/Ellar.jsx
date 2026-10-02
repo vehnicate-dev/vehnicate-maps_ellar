@@ -53,7 +53,7 @@ const Ellar = () => {
             className="mb-12 border-y border-white/15 py-5 text-center sm:mb-16"
           >
             <p className="font-ledger text-sm font-semibold text-white sm:text-base">
-              total issued ellars:
+              total Ellars issued so far:
             </p>
             <div className="mt-3 flex flex-col items-center justify-center gap-2 font-ledger text-base text-gray-300 sm:flex-row sm:gap-8 sm:text-lg">
               <p>

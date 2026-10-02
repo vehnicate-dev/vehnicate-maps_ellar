@@ -254,13 +254,15 @@ class AlivRoadDefects:
                     if p != 0 and df.iloc[si]['latitude']!=0 and df.iloc[si]['longitude']!=0 and round(df.iloc[si]['latitude'],4)!=initialLat and round(df.iloc[si]['longitude'],4)!=initialLon:
                         #print("the vehicle has moved! (lat & long): ", round(df.iloc[si]['latitude'],4), round(df.iloc[si]['longitude'],4))
                         #print(initialLat, initialLon)
-                        events.append({'start_time': ts, 'end_time': te, 'parameter': p})
+                        events.append({
+                            'start_time': ts,
+                            'end_time': te,
+                            'dp_og': float(dpOG),
+                            'dp': float(dp),
+                            'gymax': float(gymax),
+                            'stdp': float(stdp),
+                        })
 
                 buf, active = [], False
         print("number of events: ",len(events))
-        if len(events) > 1:
-            params = np.log1p([e['parameter'] for e in events])
-            norm = (params - params.min()) / (params.max() - params.min())
-            for i, e in enumerate(events):
-                e['parameter'] = float(norm[i])
         return {'speedbreakers': events}

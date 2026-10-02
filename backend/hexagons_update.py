@@ -193,6 +193,8 @@ def update_hexagons(supabase_target: Client, new_events: list, imu_only: bool = 
     for h3_index, events in by_hex.items():
         _process_hex_incremental(supabase_target, h3_index, events, imu_only)
 
+    supabase_target.rpc("refresh_hexagon_parameters", {}).execute()
+
 
 def _process_hex_incremental(
     supabase_target: Client,
@@ -214,7 +216,7 @@ def _process_hex_incremental(
             "id, h3_index, lat, lon, nd_count, user_id, trip_id, k, "
             "frozen_ellar_hex, liquid_ellar_hex, ellar_user, "
             "direction_label, osm_way_id, "
-            "nd, event_id, parameters, confirmed, rd_trip_ids, confidence, legit"
+            "nd, event_id, confirmed, rd_trip_ids, confidence, legit"
         )
         .in_("h3_index", neighbor_cells)
         .execute()
@@ -345,7 +347,6 @@ def _process_hex_incremental(
                 nd_array          = prior_nd + [uid]
                 rd_trip_ids_array = (row["rd_trip_ids"] or []) + [tid]
                 eid_array         = (row["event_id"]    or []) + [eid]
-                param_array       = (row["parameters"]  or []) + [event["parameter"]]
 
                 # Anyone re-encountering an existing RD marks it confirmed —
                 # discoverer or stranger. "legit" is reserved for a stranger.
@@ -400,7 +401,6 @@ def _process_hex_incremental(
                     "nd":                nd_array,
                     "rd_trip_ids":       rd_trip_ids_array,
                     "event_id":          eid_array,
-                    "parameters":        param_array,
                     "confirmed":         True,
                     "legit":             is_legit_now,
                     "last_confirmed_at": event["start_time"],
@@ -447,7 +447,6 @@ def _process_hex_incremental(
                     "nd":          [uid],
                     "rd_trip_ids": [tid],
                     "event_id":    [eid],
-                    "parameters":  [event["parameter"]],
                     "confirmed":   False,
                     "legit":       False,
                     "direction_label": event_direction,

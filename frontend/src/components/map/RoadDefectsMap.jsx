@@ -184,7 +184,7 @@ async function fetchEventsForCells(cells, cachedCells) {
     chunks.map(async (chunk) => {
       const { data, error } = await supabase
         .from("hexagons")
-        .select("h3_index, lat, lon, parameters, event_id, confidence, last_confirmed_at")
+        .select("h3_index, lat, lon, parameter, event_id, confidence, last_confirmed_at")
         .in("h3_index", chunk);
       if (error) { console.error("[supabase] roaddefects:", error); return []; }
       return data || [];
@@ -424,7 +424,7 @@ function buildHoverHTML(row, param, lastDetectedStr) {
 
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <span style="color:#ccc;font-weight:600;">Detections</span>
-        <span style="color:#a855f7;font-weight:700;">${row.parameters.length}</span>
+        <span style="color:#a855f7;font-weight:700;">${(row.event_id || []).length}</span>
       </div>
 
     </div>`;
@@ -1661,8 +1661,9 @@ export default function RoadDefectsMap() {
 
     for (const row of rows) {
       const { lat, lon } = row;
-      const param   = parseFloat(row.parameters[row.parameters.length - 1]);
-      const lastEid = row.event_id[row.event_id.length - 1];
+      const param   = Number(row.parameter ?? 0);
+      const eventIds = row.event_id || [];
+      const lastEid = eventIds[eventIds.length - 1];
       const color   = getEventColor(param);
       const rowKey  = `${lat.toFixed(6)},${lon.toFixed(6)}`;
 
