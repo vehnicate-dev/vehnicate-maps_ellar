@@ -270,8 +270,12 @@ function formatISTDate(utcDateInput) {
   const utcMs = new Date(utcDateInput).getTime();
   const ist = new Date(utcMs + IST_OFFSET_MS);
   const pad = (n) => String(n).padStart(2, "0");
-  return `${ist.getUTCFullYear()}-${pad(ist.getUTCMonth() + 1)}-${pad(ist.getUTCDate())} ` +
-         `${pad(ist.getUTCHours())}:${pad(ist.getUTCMinutes())} IST`;
+  const month = new Intl.DateTimeFormat("en", { month: "short", timeZone: "UTC" }).format(ist);
+  const hour = ist.getUTCHours();
+  const hour12 = hour % 12 || 12;
+  const period = hour >= 12 ? "PM" : "AM";
+  return `${month} ${pad(ist.getUTCDate())}, ${ist.getUTCFullYear()} ` +
+         `${hour12}:${pad(ist.getUTCMinutes())} ${period} IST`;
 }
 
 function applyWatermark(url, timestamp_ms, rotation = 0) {
@@ -534,7 +538,9 @@ const styles = `
     font-family: 'Ledger', serif;
     font-size: 22px;
     letter-spacing: 1px;
-    pointer-events: none;
+    pointer-events: auto;
+    cursor: pointer;
+    text-decoration: none;
     z-index: 999;
     white-space: nowrap;
     height: 48px;
@@ -661,23 +667,24 @@ const styles = `
   #rdm-city-inner {
     display: flex;
     flex-direction: column;
-    animation: rdm-scroll 18.6s infinite;
+    animation: rdm-scroll 18.6s linear infinite;
   }
   @keyframes rdm-scroll {
-    0%         { transform: translateY(0px); }
-    13.4%      { transform: translateY(0px); }
-    16.7%      { transform: translateY(-20px); }
-    29.9%      { transform: translateY(-20px); }
-    33.2%      { transform: translateY(-40px); }
-    46.4%      { transform: translateY(-40px); }
-    49.7%      { transform: translateY(-60px); }
-    62.9%      { transform: translateY(-60px); }
-    66.2%      { transform: translateY(-80px); }
-    79.4%      { transform: translateY(-80px); }
-    82.7%      { transform: translateY(-100px); }
-    96.1%      { transform: translateY(-100px); }
-    96.2%      { transform: translateY(0px); }
-    100%       { transform: translateY(0px); }
+    0%      { transform: translateY(0); }
+    10%     { transform: translateY(0); }
+    14.3%   { transform: translateY(-20px); }
+    24.3%   { transform: translateY(-20px); }
+    28.6%   { transform: translateY(-40px); }
+    38.6%   { transform: translateY(-40px); }
+    42.9%   { transform: translateY(-60px); }
+    52.9%   { transform: translateY(-60px); }
+    57.1%   { transform: translateY(-80px); }
+    67.1%   { transform: translateY(-80px); }
+    71.4%   { transform: translateY(-100px); }
+    81.4%   { transform: translateY(-100px); }
+    85.7%   { transform: translateY(-120px); }
+    95.7%   { transform: translateY(-120px); }
+    100%    { transform: translateY(-140px); }
   }
   #rdm-city-inner span { height: 20px; line-height: 20px; display: block; }
 
@@ -1886,7 +1893,9 @@ export default function RoadDefectsMap() {
           </div>
         </div>
 
-        <div id="rdm-watermark">vehnicate</div>
+        <a id="rdm-watermark" href="/">
+          vehnicate
+        </a>
       </div>
     </>
   );

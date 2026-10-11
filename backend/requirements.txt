@@ -9,6 +9,7 @@ pydantic
 python-dotenv
 Pillow
 requests
+folium
 leuvenmapmatching
 osmium
 rtree

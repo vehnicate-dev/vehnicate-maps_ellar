@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">vehnicate</string>
+    <string name="brand_logo_description">vehnicate logo</string>
+    <string name="drive_active">DRIVE ACTIVE</string>
+    <string name="ready_when_you_are">READY WHEN YOU ARE</string>
+    <string name="drive_stopped">DRIVE STOPPED</string>
+    <string name="starting_gps">STARTING GPS</string>
+    <string name="waiting_for_gps">Waiting for a high-accuracy GPS fix</string>
+    <string name="location_permission_required">LOCATION PERMISSION REQUIRED</string>
+    <string name="location_permission_rationale">Precise location is required to start drive monitoring.</string>
+    <string name="drive_start_failed">Could not start drive monitoring</string>
+    <string name="gps_monitoring_off">GPS monitoring is off</string>
+    <string name="startup_notification_hint">Keep the app notification enabled during your drive</string>
+    <string name="initial_details">On-device GPS · confirmed defects sync from Supabase</string>
+    <string name="drive_details">%1$.0f km/h · %2$d confirmed defects ready\n%3$s</string>
+    <string name="start_drive">START DRIVE</string>
+    <string name="stop_drive">STOP DRIVE</string>
+</resources>
