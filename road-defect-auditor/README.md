@@ -35,7 +35,7 @@ The project's Supabase row-level security policy must allow this key to read `he
 
 - Computes the current H3 cell at resolution **9**, matching `frontend/src/components/map/RoadDefectsMap.jsx` and `backend/main.py`.
 - Queries Supabase `hexagons` for confirmed rows in that cell and its H3 `gridDisk` ring 1 (the center plus six neighbors). It preloads newly encountered cells before they become the current cell and keeps the current seven-cell area cached.
-- Shows a live OpenStreetMap view while a drive is active, with the current GPS position, confirmed defects in the seven-cell area, and blue H3 cell outlines. Map tiles are served by OpenStreetMap.
+- Shows a live, full-screen map while a drive is active, styled to match the Vehnicate map page's light theme, with its blue H3 cell outlines and parameter-colored confirmed defects. The rider marker follows live GPS; a Vehnicate logo/title overlays the top and a stop-drive control sits at the bottom.
 - Requests high-accuracy fused location updates every second (500 ms minimum), rejects stale fixes, and waits for fixes with 35 m or better reported horizontal accuracy before alerting. Actual accuracy still depends on the phone, sky view, and environment.
 - Uses GPS course while moving, not a phone-compass bearing while stationary. Defects behind the vehicle or outside a narrow ahead-of-vehicle corridor are ignored.
 - At speeds of 40 km/h or more, announces each confirmed defect at 250 m, 100 m, and 50 m. Below 40 km/h, it announces at 100 m and 50 m. If a location update skips multiple thresholds, it announces only once for that fix and marks the skipped stages as passed.
@@ -44,7 +44,7 @@ The project's Supabase row-level security policy must allow this key to read `he
 - Speaks “Road defect in X meters” with Android's installed English text-to-speech voice. A voice whose name indicates female is preferred when available; otherwise Android's default English voice is used with a slightly higher pitch. Voice and language availability depend on the phone's installed TTS engine.
 - Requests transient audio focus with `MAY_DUCK` for the spoken warning, allowing compatible music apps to lower and restore their own playback volume.
 - A location foreground service and partial wake lock keep monitoring active with the screen off while a drive is running. Stop the drive from the app or its persistent notification.
-- Raw GPS coordinates are used on-device; Supabase receives the H3 cell IDs used for the defect query. OpenStreetMap receives tile requests for the displayed map area, but no third-party map-matching service receives the live route.
+- Raw GPS coordinates are used on-device; Supabase receives the H3 cell IDs used for the defect query. CARTO serves the displayed tiles using OpenStreetMap data, but no third-party map-matching service receives the live route.
 
 ## Carriageway matching limitation
 

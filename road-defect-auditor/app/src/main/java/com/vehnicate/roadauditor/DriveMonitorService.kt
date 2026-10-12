@@ -274,7 +274,7 @@ class DriveMonitorService : Service() {
             .newBuilder()
             .addQueryParameter(
                 "select",
-                "id,h3_index,lat,lon,confirmed",
+                "id,h3_index,lat,lon,confirmed,jerk_values,parameter",
             )
             .addQueryParameter("confirmed", "eq.true")
             .addQueryParameter(
@@ -305,6 +305,11 @@ class DriveMonitorService : Service() {
                 for (index in 0 until batch.length()) {
                     val row = batch.getJSONObject(index)
                     if (!row.optBoolean("confirmed", false)) continue
+                    val jerkArray = row.optJSONArray("jerk_values") ?: continue
+                    val jerkValues = List(jerkArray.length()) { jerkIndex ->
+                        jerkArray.optDouble(jerkIndex, Double.NaN)
+                    }
+                    if (!DefectAlertPolicy.hasPositiveMaximumJerk(jerkValues)) continue
                     val id = row.optString("id").takeUnless { it.isBlank() || it == "null" }
                         ?: continue
                     val h3Index = row.optString("h3_index")
@@ -317,8 +322,9 @@ class DriveMonitorService : Service() {
                     }
                     val lat = row.optDouble("lat", Double.NaN)
                     val lon = row.optDouble("lon", Double.NaN)
+                    val parameter = row.optDouble("parameter", 0.0)
                     if (!lat.isFinite() || !lon.isFinite() || cell !in cells) continue
-                    rows += RoadDefect(id, cell, lat, lon)
+                    rows += RoadDefect(id, cell, lat, lon, parameter)
                 }
                 batch.length()
             }
@@ -556,7 +562,8 @@ class DriveMonitorService : Service() {
                         put(
                             JSONObject()
                                 .put("latitude", defect.latitude)
-                                .put("longitude", defect.longitude),
+                                .put("longitude", defect.longitude)
+                                .put("parameter", defect.parameter),
                         )
                     }
             })
@@ -628,6 +635,7 @@ class DriveMonitorService : Service() {
         val h3Index: Long,
         val latitude: Double,
         val longitude: Double,
+        val parameter: Double,
     )
 
     private data class AlertCandidate(

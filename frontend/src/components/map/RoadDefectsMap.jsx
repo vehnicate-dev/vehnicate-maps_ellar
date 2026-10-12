@@ -405,8 +405,8 @@ function buildHoverHTML(row, param, lastDetectedStr) {
   const jerkValues = Array.isArray(row.jerk_values)
     ? row.jerk_values.map(Number).filter(Number.isFinite)
     : [];
-  const meanJerk = jerkValues.length
-    ? (jerkValues.reduce((sum, value) => sum + value, 0) / jerkValues.length).toFixed(5)
+  const maximumJerk = jerkValues.length
+    ? Math.max(...jerkValues).toFixed(5)
     : "—";
 
   return `
@@ -433,8 +433,8 @@ function buildHoverHTML(row, param, lastDetectedStr) {
       </div>
 
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-        <span style="color:#ccc;font-weight:600;">Mean jerk (m/s^3)</span>
-        <span style="color:#fff;">${meanJerk}</span>
+        <span style="color:#ccc;font-weight:600;">Maximum jerk (m/s^3)</span>
+        <span style="color:#fff;">${maximumJerk}</span>
       </div>
 
       <div style="display:flex;justify-content:space-between;align-items:center;">

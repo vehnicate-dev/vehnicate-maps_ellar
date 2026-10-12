@@ -9,6 +9,14 @@ import java.io.IOException
 
 class DefectAlertPolicyTest {
     @Test
+    fun onlyDefectsWithPositiveMaximumJerkAreEligibleForAlerts() {
+        assertTrue(DefectAlertPolicy.hasPositiveMaximumJerk(listOf(-2.0, 0.1, 0.0)))
+        assertFalse(DefectAlertPolicy.hasPositiveMaximumJerk(listOf(-2.0, 0.0)))
+        assertFalse(DefectAlertPolicy.hasPositiveMaximumJerk(emptyList()))
+        assertFalse(DefectAlertPolicy.hasPositiveMaximumJerk(listOf(Double.NaN, Double.NEGATIVE_INFINITY)))
+    }
+
+    @Test
     fun approachWarningUsesTheFortyKilometersPerHourThreshold() {
         assertEquals(100, DefectAlertPolicy.approachDistanceMeters(39.99))
         assertEquals(250, DefectAlertPolicy.approachDistanceMeters(40.0))

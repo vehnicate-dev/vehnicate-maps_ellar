@@ -3,6 +3,11 @@ from typing import List, Dict, Any
 import pandas as pd
 import numpy as np
 from scipy.signal import butter, filtfilt
+from aliv_parameter import (
+    GRAVITY_M_S2,
+    calculate_raw_score,
+    transform_accel_z_to_vehicle_frame,
+)
 
 
 class AlivRoadDefects:
@@ -63,7 +68,7 @@ class AlivRoadDefects:
     # ==========================================================
 
     def phone_to_vehicle(self, df):
-        g = 9.8
+        g = GRAVITY_M_S2
         ax, ay, az = df['accelx'], df['accely'], df['accelz']
         Ax, Ay, Az = df['useraccelx'], df['useraccely'], -df['useraccelz']
         Gx, Gy, Gz = df['gyrox'], df['gyroy'], df['gyroz']
@@ -87,9 +92,10 @@ class AlivRoadDefects:
         AY = -(Ax * m.sin(theta) * m.cos(phi) +
                Az * m.cos(theta) * m.cos(phi) -
                Ay * m.sin(phi))
-        AZ = -(Ax * m.sin(theta) * m.sin(phi) -
-               Az * m.cos(theta) * m.sin(phi) +
-               Ay * m.cos(phi))
+        AZ = transform_accel_z_to_vehicle_frame(
+            ax, ay, az,
+            df['useraccelx'], df['useraccely'], df['useraccelz'],
+        )
 
         GX = -Gx * m.cos(theta) + Gz * m.sin(theta)
         GY = -(Gx * m.sin(theta) * m.cos(phi) +
@@ -219,9 +225,15 @@ class AlivRoadDefects:
 
         filt_pitch = filt_pitch[50:-50]
         gyro_y = df['gyro_y'].values[50:-50]
+        vehicle_accel_z = df['acc_z'].values[50:-50]
         time_f = df['time_ms'].values[50:-50]
 
-        df_f = pd.DataFrame({'Pitch': filt_pitch, 'gyro_y': gyro_y, 'time_ms': time_f})
+        df_f = pd.DataFrame({
+            'Pitch': filt_pitch,
+            'gyro_y': gyro_y,
+            'acc_z': vehicle_accel_z,
+            'time_ms': time_f,
+        })
 
         chunks = self.Chunking(df_f, 'Pitch', 'gyro_y')
         s = np.std(filt_pitch) * 1.0 #(1.0->1.50->1.25->1.50->1.40->1.0)
@@ -248,8 +260,9 @@ class AlivRoadDefects:
                     stdp = np.std(filt_pitch[si:ei+1])
                     gymax = np.max(np.abs(gyro_y[si:ei+1]))
                     dpOG = np.max(raw_pitch[rs:re+1]) - np.min(raw_pitch[rs:re+1])
+                    az_rms = np.sqrt(np.mean(np.square(vehicle_accel_z[si:ei+1])))
 
-                    p = ((dpOG + dp) / 2) * gymax * stdp
+                    p = calculate_raw_score(dpOG, dp, gymax, stdp, az_rms)
 
                     if p != 0 and df.iloc[si]['latitude']!=0 and df.iloc[si]['longitude']!=0 and round(df.iloc[si]['latitude'],4)!=initialLat and round(df.iloc[si]['longitude'],4)!=initialLon:
                         #print("the vehicle has moved! (lat & long): ", round(df.iloc[si]['latitude'],4), round(df.iloc[si]['longitude'],4))
@@ -261,6 +274,7 @@ class AlivRoadDefects:
                             'dp': float(dp),
                             'gymax': float(gymax),
                             'stdp': float(stdp),
+                            'az_rms': float(az_rms),
                         })
 
                 buf, active = [], False

@@ -406,6 +406,7 @@ def enrich_events(
             "dp":         event["dp"],
             "gymax":      event["gymax"],
             "stdp":       event["stdp"],
+            "az_rms":     event["az_rms"],
             "path":       lat_lon,
             "direction_label": event_direction,
             "osm_way_id": event_way_id,

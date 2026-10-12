@@ -12,8 +12,10 @@ import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -21,6 +23,8 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.core.content.ContextCompat
 import androidx.core.view.setPadding
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import org.json.JSONObject
 
 class MainActivity : Activity() {
@@ -28,6 +32,9 @@ class MainActivity : Activity() {
     private lateinit var detailsText: TextView
     private lateinit var driveButton: Button
     private lateinit var mapView: WebView
+    private lateinit var idleScreen: LinearLayout
+    private lateinit var driveHeader: LinearLayout
+    private lateinit var stopDriveButton: Button
     private var driveActive = false
     private var mapPageReady = false
     private var pendingMapData: String? = null
@@ -83,7 +90,25 @@ class MainActivity : Activity() {
     }
 
     private fun buildScreen() {
-        val root = LinearLayout(this).apply {
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+        }
+
+        mapView = WebView(this).apply {
+            setBackgroundColor(0xFFF4F1E8.toInt())
+            settings.javaScriptEnabled = true
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    mapPageReady = true
+                    pendingMapData?.let(::renderDriveMap)
+                }
+            }
+            val mapHtml = assets.open("drive_map.html").bufferedReader().use { it.readText() }
+            loadDataWithBaseURL("https://vehnicate.com/", mapHtml, "text/html", "UTF-8", null)
+        }
+        root.addView(mapView, FrameLayout.LayoutParams(-1, -1))
+
+        idleScreen = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(dp(28))
@@ -95,7 +120,7 @@ class MainActivity : Activity() {
             contentDescription = getString(R.string.brand_logo_description)
             scaleType = ImageView.ScaleType.FIT_CENTER
         }
-        root.addView(logo, LinearLayout.LayoutParams(dp(104), dp(104)).apply {
+        idleScreen.addView(logo, LinearLayout.LayoutParams(dp(104), dp(104)).apply {
             bottomMargin = dp(18)
         })
 
@@ -107,7 +132,7 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
         }
-        root.addView(title, matchWrap())
+        idleScreen.addView(title, matchWrap())
 
         stateText = TextView(this).apply {
             text = getString(
@@ -118,7 +143,7 @@ class MainActivity : Activity() {
             setTextColor(Color.LTGRAY)
             gravity = Gravity.CENTER
         }
-        root.addView(stateText, LinearLayout.LayoutParams(-1, -2).apply {
+        idleScreen.addView(stateText, LinearLayout.LayoutParams(-1, -2).apply {
             topMargin = dp(42)
         })
 
@@ -129,29 +154,13 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             setLineSpacing(dp(5).toFloat(), 1f)
         }
-        root.addView(detailsText, LinearLayout.LayoutParams(-1, -2).apply {
+        idleScreen.addView(detailsText, LinearLayout.LayoutParams(-1, -2).apply {
             topMargin = dp(12)
             bottomMargin = dp(32)
         })
 
-        mapView = WebView(this).apply {
-            setBackgroundColor(0xFFE2E8F0.toInt())
-            settings.javaScriptEnabled = true
-            webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    mapPageReady = true
-                    pendingMapData?.let(::renderDriveMap)
-                }
-            }
-            val mapHtml = assets.open("drive_map.html").bufferedReader().use { it.readText() }
-            loadDataWithBaseURL("https://vehnicate.com/", mapHtml, "text/html", "UTF-8", null)
-        }
-        root.addView(mapView, LinearLayout.LayoutParams(-1, 0, 1f).apply {
-            bottomMargin = dp(20)
-        })
-        mapView.visibility = if (driveActive) ViewGroup.VISIBLE else ViewGroup.GONE
-
         driveButton = Button(this).apply {
+            text = getString(R.string.start_drive)
             textSize = 14f
             letterSpacing = 0.08f
             setTextColor(Color.BLACK)
@@ -159,8 +168,58 @@ class MainActivity : Activity() {
             setPadding(dp(28), dp(14), dp(28), dp(14))
             setOnClickListener { onDriveButtonPressed() }
         }
-        root.addView(driveButton, LinearLayout.LayoutParams(-1, dp(58)))
+        idleScreen.addView(driveButton, LinearLayout.LayoutParams(-1, dp(58)))
+        root.addView(idleScreen, FrameLayout.LayoutParams(-1, -1))
+
+        driveHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(8), dp(20), dp(8))
+            setBackgroundColor(0xF20C0C12.toInt())
+            elevation = dp(8).toFloat()
+        }
+        val driveLogo = ImageView(this).apply {
+            setImageResource(R.drawable.in_app_logo)
+            contentDescription = getString(R.string.brand_logo_description)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+        driveHeader.addView(driveLogo, LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+            marginEnd = dp(10)
+        })
+        val driveTitle = TextView(this).apply {
+            text = "vehnicate"
+            textSize = 20f
+            letterSpacing = 0.04f
+            typeface = Typeface.createFromAsset(assets, "fonts/Ledger-Regular.ttf")
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        driveHeader.addView(driveTitle, matchWrap())
+        root.addView(
+            driveHeader,
+            FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
+                topMargin = dp(16)
+            },
+        )
+
+        stopDriveButton = Button(this).apply {
+            text = "■  STOP DRIVE"
+            textSize = 14f
+            letterSpacing = 0.06f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(0xF20C0C12.toInt())
+            setPadding(dp(24), dp(12), dp(24), dp(12))
+            elevation = dp(8).toFloat()
+            setOnClickListener { onDriveButtonPressed() }
+        }
+        root.addView(
+            stopDriveButton,
+            FrameLayout.LayoutParams(-2, dp(56), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                bottomMargin = dp(28)
+            },
+        )
         setContentView(root)
+        updateButton()
     }
 
     private fun onDriveButtonPressed() {
@@ -257,12 +316,18 @@ class MainActivity : Activity() {
     }
 
     private fun updateButton() {
-        driveButton.text = getString(
-            if (driveActive) R.string.stop_drive else R.string.start_drive,
-        )
-        driveButton.setTextColor(if (driveActive) Color.WHITE else Color.BLACK)
-        driveButton.setBackgroundColor(if (driveActive) 0xFF242424.toInt() else Color.WHITE)
-        mapView.visibility = if (driveActive) ViewGroup.VISIBLE else ViewGroup.GONE
+        idleScreen.visibility = if (driveActive) View.GONE else View.VISIBLE
+        mapView.visibility = if (driveActive) View.VISIBLE else View.GONE
+        driveHeader.visibility = if (driveActive) View.VISIBLE else View.GONE
+        stopDriveButton.visibility = if (driveActive) View.VISIBLE else View.GONE
+        val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+        if (driveActive) {
+            insetsController.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            insetsController.show(WindowInsetsCompat.Type.systemBars())
+        }
     }
 
     private fun updateDriveMap(mapData: String?) {
