@@ -35,15 +35,16 @@ The project's Supabase row-level security policy must allow this key to read `he
 
 - Computes the current H3 cell at resolution **9**, matching `frontend/src/components/map/RoadDefectsMap.jsx` and `backend/main.py`.
 - Queries Supabase `hexagons` for confirmed rows in that cell and its H3 `gridDisk` ring 1 (the center plus six neighbors). It preloads newly encountered cells before they become the current cell and keeps the current seven-cell area cached.
+- Shows a live OpenStreetMap view while a drive is active, with the current GPS position, confirmed defects in the seven-cell area, and blue H3 cell outlines. Map tiles are served by OpenStreetMap.
 - Requests high-accuracy fused location updates every second (500 ms minimum), rejects stale fixes, and waits for fixes with 35 m or better reported horizontal accuracy before alerting. Actual accuracy still depends on the phone, sky view, and environment.
 - Uses GPS course while moving, not a phone-compass bearing while stationary. Defects behind the vehicle or outside a narrow ahead-of-vehicle corridor are ignored.
-- Announces each confirmed defect once at an approach distance based on 15 seconds of current speed (about 250 m at 60 km/h and 333 m at 80 km/h), then once at 100 m and once at 50 m. If a location update skips a threshold, only the closest already-reached stage is announced.
+- At speeds of 40 km/h or more, announces each confirmed defect at 250 m, 100 m, and 50 m. Below 40 km/h, it announces at 100 m and 50 m. If a location update skips multiple thresholds, it announces only once for that fix and marks the skipped stages as passed.
 - The in-app logo uses `frontend/public/hn-logo_light.png`; the Android launcher icon keeps its existing image.
 - These distances are straight-line GPS projections along the current heading, not road-routed or lane-level estimates. Fused high-accuracy positioning cannot guarantee Google Maps-level accuracy; GPS and the stored defect coordinates can still be off by several metres or more.
 - Speaks “Road defect in X meters” with Android's installed English text-to-speech voice. A voice whose name indicates female is preferred when available; otherwise Android's default English voice is used with a slightly higher pitch. Voice and language availability depend on the phone's installed TTS engine.
 - Requests transient audio focus with `MAY_DUCK` for the spoken warning, allowing compatible music apps to lower and restore their own playback volume.
 - A location foreground service and partial wake lock keep monitoring active with the screen off while a drive is running. Stop the drive from the app or its persistent notification.
-- Raw GPS coordinates are used on-device; Supabase receives the H3 cell IDs used for the defect query. No third-party map-matching service receives the live route.
+- Raw GPS coordinates are used on-device; Supabase receives the H3 cell IDs used for the defect query. OpenStreetMap receives tile requests for the displayed map area, but no third-party map-matching service receives the live route.
 
 ## Carriageway matching limitation
 

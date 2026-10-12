@@ -9,17 +9,18 @@ import java.io.IOException
 
 class DefectAlertPolicyTest {
     @Test
-    fun approachWarningTargetsFifteenSecondsBeforeImpact() {
-        assertEquals(83, DefectAlertPolicy.approachDistanceMeters(20.0))
+    fun approachWarningUsesTheFortyKilometersPerHourThreshold() {
+        assertEquals(100, DefectAlertPolicy.approachDistanceMeters(39.99))
+        assertEquals(250, DefectAlertPolicy.approachDistanceMeters(40.0))
         assertEquals(250, DefectAlertPolicy.approachDistanceMeters(60.0))
-        assertEquals(333, DefectAlertPolicy.approachDistanceMeters(80.0))
+        assertEquals(250, DefectAlertPolicy.approachDistanceMeters(80.0))
     }
 
     @Test
-    fun alertsAreIssuedOnceAtApproachOneHundredAndFiftyMeters() {
+    fun highSpeedAlertsAreIssuedAtTwoHundredFiftyOneHundredAndFiftyMeters() {
         val noAlerts = emptySet<DefectAlertPolicy.AlertStage>()
-        val approach = DefectAlertPolicy.nextAlertDecision(300.0, 80.0, noAlerts)
-        assertEquals(300, approach?.distanceMeters)
+        val approach = DefectAlertPolicy.nextAlertDecision(250.0, 80.0, noAlerts)
+        assertEquals(250, approach?.distanceMeters)
         assertEquals(
             setOf(DefectAlertPolicy.AlertStage.APPROACH),
             approach?.consumedStages,
@@ -78,7 +79,47 @@ class DefectAlertPolicyTest {
         )
 
         assertEquals(100, decision?.distanceMeters)
-        assertEquals(setOf(DefectAlertPolicy.AlertStage.NEAR), decision?.consumedStages)
+        assertEquals(
+            setOf(DefectAlertPolicy.AlertStage.APPROACH, DefectAlertPolicy.AlertStage.NEAR),
+            decision?.consumedStages,
+        )
+    }
+
+    @Test
+    fun lowSpeedHasOnlyTheHundredAndFiftyMeterAlerts() {
+        val firstAlert = DefectAlertPolicy.nextAlertDecision(100.0, 39.99, emptySet())
+        assertEquals(
+            null,
+            DefectAlertPolicy.nextAlertDecision(
+                90.0,
+                40.0,
+                firstAlert?.consumedStages.orEmpty(),
+            ),
+        )
+        val finalAlert = DefectAlertPolicy.nextAlertDecision(
+            50.0,
+            39.99,
+            firstAlert?.consumedStages.orEmpty(),
+        )
+
+        assertEquals(100, firstAlert?.distanceMeters)
+        assertEquals(50, finalAlert?.distanceMeters)
+        assertEquals(
+            setOf(
+                DefectAlertPolicy.AlertStage.APPROACH,
+                DefectAlertPolicy.AlertStage.NEAR,
+                DefectAlertPolicy.AlertStage.IMMEDIATE,
+            ),
+            firstAlert?.consumedStages.orEmpty() + finalAlert?.consumedStages.orEmpty(),
+        )
+        assertEquals(
+            null,
+            DefectAlertPolicy.nextAlertDecision(
+                40.0,
+                39.99,
+                firstAlert?.consumedStages.orEmpty() + finalAlert?.consumedStages.orEmpty(),
+            ),
+        )
     }
 
     @Test

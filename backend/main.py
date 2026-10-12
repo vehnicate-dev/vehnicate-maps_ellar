@@ -18,6 +18,7 @@ from hexagons_update import update_hexagons
 from zoneinfo import ZoneInfo
 from distance import compute_total_distance
 from map_matching import init_map_matcher, map_match_trip
+from velocity_jerk import estimate_velocity_jerk
 
 IST = ZoneInfo("Asia/Kolkata")
 """
@@ -311,6 +312,7 @@ def build_aliv_input(df: pd.DataFrame) -> list[dict]:
     })
     return renamed.to_dict(orient="records")
 
+
 '''
 def aliv_ms_to_absolute(aliv_ms: float, timesent_T0: pd.Timestamp, aliv_trim_offset: float) -> pd.Timestamp:
     """
@@ -328,6 +330,7 @@ def enrich_events(
     user_id: str,
     result: dict,
     df: pd.DataFrame,
+    gps_df: pd.DataFrame,
     timesent_T0: pd.Timestamp,
     aliv_trim_offset
 ) -> list:
@@ -366,6 +369,11 @@ def enrich_events(
 
         start_time = pd.to_datetime(subset["timestamp_ms"].iloc[0], unit="ms", utc=True)
         end_time   = pd.to_datetime(subset["timestamp_ms"].iloc[-1], unit="ms", utc=True)
+        jerk_mps3 = estimate_velocity_jerk(
+            gps_df["timestamp_ms"].tolist(),
+            gps_df["speed"].tolist(),
+            int(start_time.timestamp() * 1000),
+        )
 
         lat_lon = (
             subset[["matched_lat", "matched_lon"]]
@@ -393,6 +401,7 @@ def enrich_events(
             "h3_index":   h3_index,
             "start_time": pd.to_datetime(start_time, utc=True).astimezone(IST).isoformat(),
             "end_time":   pd.to_datetime(end_time, utc=True).astimezone(IST).isoformat(),
+            "jerk_mps3":  jerk_mps3,
             "dp_og":      event["dp_og"],
             "dp":         event["dp"],
             "gymax":      event["gymax"],
@@ -741,7 +750,7 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
 
     # ── 5. Enrich events (matched coordinates + direction_label) ───────────────
     enriched_events = enrich_events(
-        session_id, vehicle_id, user_id, result, df, timesent_T0, aliv_trim_offset
+        session_id, vehicle_id, user_id, result, df, gps_df, timesent_T0, aliv_trim_offset
     )
     print(f"[process_trip] Enriched events: {len(enriched_events)}")
     if not enriched_events:
@@ -756,7 +765,10 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     # direction_label and osm_way_id ARE real columns on imu_events (see
     # migration.sql) and pass through untouched.
     events_for_db = [
-        {k: v for k, v in e.items() if k not in ("vehicle_id", "user_id")}
+        {
+            k: v for k, v in e.items()
+            if k not in ("vehicle_id", "user_id", "jerk_mps3")
+        }
         for e in enriched_events
     ]
     insert_response = _execute_with_retry(
@@ -769,6 +781,7 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
         event["id"]         = event.pop("imu_events_id")
         event["user_id"]    = enriched_events[i]["user_id"]
         event["vehicle_id"] = enriched_events[i]["vehicle_id"]
+        event["jerk_mps3"]  = enriched_events[i]["jerk_mps3"]
 
     # ── 7. Update hexagons ─────────────────────────────────────────────────────
     try:

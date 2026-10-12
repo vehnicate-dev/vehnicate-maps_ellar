@@ -184,7 +184,7 @@ async function fetchEventsForCells(cells, cachedCells) {
     chunks.map(async (chunk) => {
       const { data, error } = await supabase
         .from("hexagons")
-        .select("h3_index, lat, lon, parameter, event_id, confidence, last_confirmed_at")
+        .select("h3_index, lat, lon, parameter, event_id, confidence, last_confirmed_at, jerk_values")
         .in("h3_index", chunk);
       if (error) { console.error("[supabase] roaddefects:", error); return []; }
       return data || [];
@@ -402,6 +402,12 @@ async function buildImagePopupHTML(row, param, frames, rotation = 0, opts = {}) 
 
 function buildHoverHTML(row, param, lastDetectedStr) {
   const color = getEventColor(param);
+  const jerkValues = Array.isArray(row.jerk_values)
+    ? row.jerk_values.map(Number).filter(Number.isFinite)
+    : [];
+  const meanJerk = jerkValues.length
+    ? (jerkValues.reduce((sum, value) => sum + value, 0) / jerkValues.length).toFixed(5)
+    : "—";
 
   return `
     <div style="font-family:monospace;font-size:12px;min-width:200px;">
@@ -413,7 +419,7 @@ function buildHoverHTML(row, param, lastDetectedStr) {
 
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <span style="color:#ccc;font-weight:600;">Longitude</span>
-        <span style="color:#fff;">${row.lat}</span>
+        <span style="color:#fff;">${row.lon}</span>
       </div>
 
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
@@ -424,6 +430,11 @@ function buildHoverHTML(row, param, lastDetectedStr) {
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <span style="color:#ccc;font-weight:600;">Parameter</span>
         <span style="font-weight:700;color:${color};">${param.toFixed(3)}</span>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <span style="color:#ccc;font-weight:600;">Mean jerk (m/s^3)</span>
+        <span style="color:#fff;">${meanJerk}</span>
       </div>
 
       <div style="display:flex;justify-content:space-between;align-items:center;">

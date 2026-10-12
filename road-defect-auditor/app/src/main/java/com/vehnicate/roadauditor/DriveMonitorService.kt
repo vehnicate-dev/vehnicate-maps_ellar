@@ -35,6 +35,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONException
+import org.json.JSONObject
 import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -526,8 +527,40 @@ class DriveMonitorService : Service() {
                 .putExtra(EXTRA_SPEED_KMH, latestSpeedKmh)
                 .putExtra(EXTRA_CELL, latestCell)
                 .putExtra(EXTRA_DEFECT_COUNT, confirmedDefects.size)
+                .putExtra(EXTRA_MAP_DATA, if (monitoringStarted) buildMapData() else null)
                 .putExtra(EXTRA_RUNNING, monitoringStarted),
         )
+    }
+
+    private fun buildMapData(): String? {
+        val location = latestLocation ?: return null
+        val cells = currentNeighborCells.ifEmpty {
+            setOf(h3.latLngToCell(location.latitude, location.longitude, H3_RESOLUTION))
+        }
+        val payload = JSONObject()
+            .put("latitude", location.latitude)
+            .put("longitude", location.longitude)
+            .put("hexagons", JSONArray().apply {
+                cells.forEach { cell ->
+                    put(JSONArray().apply {
+                        h3.cellToBoundary(cell).forEach { vertex ->
+                            put(JSONArray().put(vertex.lat).put(vertex.lng))
+                        }
+                    })
+                }
+            })
+            .put("defects", JSONArray().apply {
+                confirmedDefects.values
+                    .filter { it.h3Index in cells }
+                    .forEach { defect ->
+                        put(
+                            JSONObject()
+                                .put("latitude", defect.latitude)
+                                .put("longitude", defect.longitude),
+                        )
+                    }
+            })
+        return payload.toString()
     }
 
     private fun publishDriveStatus() {
@@ -611,6 +644,7 @@ class DriveMonitorService : Service() {
         const val EXTRA_SPEED_KMH = "speed_kmh"
         const val EXTRA_CELL = "cell"
         const val EXTRA_DEFECT_COUNT = "defect_count"
+        const val EXTRA_MAP_DATA = "map_data"
         const val EXTRA_RUNNING = "running"
 
         private const val TAG = "DriveMonitor"

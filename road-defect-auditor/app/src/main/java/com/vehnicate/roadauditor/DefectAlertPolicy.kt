@@ -25,10 +25,7 @@ internal object DefectAlertPolicy {
         if (!distanceAheadMeters.isFinite() || distanceAheadMeters <= 0.0) return null
 
         val milestones = buildList {
-            val approachDistance = approachDistanceMeters(speedKmh)
-            if (approachDistance > NEAR_DISTANCE_METERS) {
-                add(AlertStage.APPROACH to approachDistance)
-            }
+            add(AlertStage.APPROACH to approachDistanceMeters(speedKmh))
             add(AlertStage.NEAR to NEAR_DISTANCE_METERS)
             add(AlertStage.IMMEDIATE to IMMEDIATE_DISTANCE_METERS)
         }
@@ -46,11 +43,10 @@ internal object DefectAlertPolicy {
     }
 
     fun approachDistanceMeters(speedKmh: Double): Int =
-        if (speedKmh.isFinite()) {
-            (speedKmh.coerceAtLeast(0.0) * METERS_PER_SECOND_PER_KMH * APPROACH_LEAD_SECONDS)
-                .roundToInt()
+        if (speedKmh >= HIGH_SPEED_THRESHOLD_KMH) {
+            HIGH_SPEED_APPROACH_DISTANCE_METERS
         } else {
-            0
+            NEAR_DISTANCE_METERS
         }
 
     fun distanceAheadInTravelCorridor(
@@ -87,8 +83,8 @@ internal object DefectAlertPolicy {
 
     private fun signedAngle(degrees: Double): Double = ((degrees + 540.0) % 360.0) - 180.0
 
-    private const val METERS_PER_SECOND_PER_KMH = 1.0 / 3.6
-    private const val APPROACH_LEAD_SECONDS = 15.0
+    private const val HIGH_SPEED_THRESHOLD_KMH = 40.0
+    private const val HIGH_SPEED_APPROACH_DISTANCE_METERS = 250
     private const val NEAR_DISTANCE_METERS = 100
     private const val IMMEDIATE_DISTANCE_METERS = 50
     private const val MAX_FORWARD_ANGLE_DEGREES = 55.0

@@ -17,14 +17,20 @@ import android.widget.Button
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.core.content.ContextCompat
 import androidx.core.view.setPadding
+import org.json.JSONObject
 
 class MainActivity : Activity() {
     private lateinit var stateText: TextView
     private lateinit var detailsText: TextView
     private lateinit var driveButton: Button
+    private lateinit var mapView: WebView
     private var driveActive = false
+    private var mapPageReady = false
+    private var pendingMapData: String? = null
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -42,6 +48,7 @@ class MainActivity : Activity() {
                 cell.isBlank() -> getString(R.string.waiting_for_gps)
                 else -> getString(R.string.drive_details, speed, count, cell)
             }
+            updateDriveMap(intent.getStringExtra(DriveMonitorService.EXTRA_MAP_DATA))
         }
     }
 
@@ -67,6 +74,12 @@ class MainActivity : Activity() {
     override fun onStop() {
         unregisterReceiver(statusReceiver)
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        mapView.stopLoading()
+        mapView.destroy()
+        super.onDestroy()
     }
 
     private fun buildScreen() {
@@ -120,6 +133,23 @@ class MainActivity : Activity() {
             topMargin = dp(12)
             bottomMargin = dp(32)
         })
+
+        mapView = WebView(this).apply {
+            setBackgroundColor(0xFFE2E8F0.toInt())
+            settings.javaScriptEnabled = true
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    mapPageReady = true
+                    pendingMapData?.let(::renderDriveMap)
+                }
+            }
+            val mapHtml = assets.open("drive_map.html").bufferedReader().use { it.readText() }
+            loadDataWithBaseURL("https://vehnicate.com/", mapHtml, "text/html", "UTF-8", null)
+        }
+        root.addView(mapView, LinearLayout.LayoutParams(-1, 0, 1f).apply {
+            bottomMargin = dp(20)
+        })
+        mapView.visibility = if (driveActive) ViewGroup.VISIBLE else ViewGroup.GONE
 
         driveButton = Button(this).apply {
             textSize = 14f
@@ -232,6 +262,20 @@ class MainActivity : Activity() {
         )
         driveButton.setTextColor(if (driveActive) Color.WHITE else Color.BLACK)
         driveButton.setBackgroundColor(if (driveActive) 0xFF242424.toInt() else Color.WHITE)
+        mapView.visibility = if (driveActive) ViewGroup.VISIBLE else ViewGroup.GONE
+    }
+
+    private fun updateDriveMap(mapData: String?) {
+        if (mapData.isNullOrBlank()) return
+        pendingMapData = mapData
+        if (mapPageReady) renderDriveMap(mapData)
+    }
+
+    private fun renderDriveMap(mapData: String) {
+        mapView.evaluateJavascript(
+            "window.updateDriveMap(${JSONObject.quote(mapData)})",
+            null,
+        )
     }
 
     private fun matchWrap() = LinearLayout.LayoutParams(

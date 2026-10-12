@@ -31,7 +31,7 @@ def _weighted_centroid(
     return (lat, lon), n
 
 
-PROXIMITY_THRESHOLD_M = 15  # metres
+PROXIMITY_THRESHOLD_M = 20  # metres
 
 
 def _find_nearby_key(
@@ -216,7 +216,7 @@ def _process_hex_incremental(
             "id, h3_index, lat, lon, nd_count, user_id, trip_id, k, "
             "frozen_ellar_hex, liquid_ellar_hex, ellar_user, "
             "direction_label, osm_way_id, "
-            "nd, event_id, confirmed, rd_trip_ids, confidence, legit"
+            "nd, event_id, confirmed, rd_trip_ids, confidence, legit, jerk_values"
         )
         .in_("h3_index", neighbor_cells)
         .execute()
@@ -405,6 +405,11 @@ def _process_hex_incremental(
                     "legit":             is_legit_now,
                     "last_confirmed_at": event["start_time"],
                 }
+                jerk_mps3 = event.get("jerk_mps3")
+                if jerk_mps3 is not None and math.isfinite(float(jerk_mps3)):
+                    update_payload["jerk_values"] = (
+                        row.get("jerk_values") or []
+                    ) + [float(jerk_mps3)]
 
                 same_hex = row["h3_index"] == h3_index
                 if same_hex:
@@ -449,6 +454,7 @@ def _process_hex_incremental(
                     "event_id":    [eid],
                     "confirmed":   False,
                     "legit":       False,
+                    "jerk_values": [],
                     "direction_label": event_direction,
                     "osm_way_id":      event_way_id,
                 }
