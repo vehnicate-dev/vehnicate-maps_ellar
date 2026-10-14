@@ -92,10 +92,9 @@ class AlivRoadDefects:
         AY = -(Ax * m.sin(theta) * m.cos(phi) +
                Az * m.cos(theta) * m.cos(phi) -
                Ay * m.sin(phi))
-        AZ = transform_accel_z_to_vehicle_frame(
-            ax, ay, az,
-            df['useraccelx'], df['useraccely'], df['useraccelz'],
-        )
+        AZ = -(Ax * m.sin(theta) * m.sin(phi)
+       - Az * m.cos(theta) * m.sin(phi)
+       + Ay * m.cos(phi))
 
         GX = -Gx * m.cos(theta) + Gz * m.sin(theta)
         GY = -(Gx * m.sin(theta) * m.cos(phi) +

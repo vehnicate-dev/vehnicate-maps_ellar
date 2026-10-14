@@ -2,8 +2,8 @@ package com.vehnicate.roadauditor
 
 import kotlin.math.abs
 import kotlin.math.cos
-import kotlin.math.sin
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 internal object DefectAlertPolicy {
     enum class AlertStage {

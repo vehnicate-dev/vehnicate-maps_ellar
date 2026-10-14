@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    >
+    <style>
+      html, body, #map { width: 100%; height: 100%; margin: 0; }
+      #map { background: #f4f1e8; }
+      .leaflet-tile-pane {
+        filter: invert(1) hue-rotate(180deg) brightness(1.04) contrast(0.92) saturate(0.85);
+        transition: filter 0.75s ease;
+      }
+      .leaflet-control-attribution { font-size: 9px; }
+    </style>
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+  </head>
+  <body>
+    <div id="map"></div>
+    <script>
+      const map = L.map("map", { zoomControl: false }).setView([13.05, 80.22], 15);
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=cb1_2gzd_1_d14af46dbfbc5d8f214caf08", {
+        maxZoom: 19,
+        subdomains: "abcd",
+        attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+      }).addTo(map);
+
+      const hexagons = L.layerGroup().addTo(map);
+      const defects = L.layerGroup().addTo(map);
+      const trajectory = L.layerGroup().addTo(map);
+      let riderMarker = null;
+
+      function getEventColor(parameter) {
+        const value = Math.max(0, Math.min(1, parameter));
+        if (value < 0.3) {
+          const x = Math.pow(value / 0.3, 2);
+          return `rgb(0,${Math.round(120 + 135 * x)},0)`;
+        }
+        if (value < 0.5) {
+          const x = Math.pow((value - 0.3) / 0.2, 2);
+          return `rgb(255,${Math.round(140 - 90 * x)},0)`;
+        }
+        const x = Math.pow((value - 0.5) / 0.5, 2);
+        return `rgb(255,${Math.round(50 * (1 - x))},0)`;
+      }
+
+      window.updateDriveMap = (serializedData) => {
+        const data = JSON.parse(serializedData);
+        const rider = [data.latitude, data.longitude];
+        map.invalidateSize({ pan: false });
+        hexagons.clearLayers();
+        defects.clearLayers();
+        trajectory.clearLayers();
+
+        const predictedRoute = data.trajectory || [];
+        if (predictedRoute.length >= 2) {
+          L.polyline(predictedRoute, {
+            color: "#3b82f6",
+            weight: 4,
+            opacity: 0.9,
+            dashArray: "6 10",
+            lineCap: "round",
+          }).addTo(trajectory);
+        }
+
+        data.hexagons.forEach((boundary) => {
+          L.polygon(boundary, {
+            color: "#4a71b0",
+            fillColor: "#3b82f6",
+            fillOpacity: 0.15,
+            weight: 1.5,
+            opacity: 0.5,
+          }).addTo(hexagons);
+        });
+
+        data.defects.forEach((defect) => {
+          const color = getEventColor(Number(defect.parameter) || 0);
+          L.circle([defect.latitude, defect.longitude], {
+            radius: 4,
+            color,
+            fillColor: color,
+            fillOpacity: 0.9,
+            weight: 1.5,
+          }).addTo(defects);
+        });
+
+        if (riderMarker) {
+          riderMarker.setLatLng(rider);
+          map.panTo(rider, { animate: false });
+        } else {
+          riderMarker = L.circleMarker(rider, {
+            radius: 7,
+            color: "#ffffff",
+            fillColor: "#2563eb",
+            fillOpacity: 1,
+            weight: 3,
+          }).addTo(map);
+          map.setView(rider, 15, { animate: false });
+        }
+      };
+    </script>
+  </body>
+</html>
