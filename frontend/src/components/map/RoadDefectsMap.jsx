@@ -525,9 +525,10 @@ const styles = `
   }
   #rdm-map .leaflet-tile-pane {
     transition: filter 0.75s ease;
+    filter: grayscale(1) brightness(0.78);
   }
   #rdm-container.theme-light #rdm-map .leaflet-tile-pane {
-    filter: invert(1) hue-rotate(180deg) brightness(1.04) contrast(0.92) saturate(0.85);
+    filter: invert(1) hue-rotate(180deg) brightness(1.04) contrast(0.92) saturate(0.85) grayscale(1);
   }
 
   #rdm-iris-layer {
