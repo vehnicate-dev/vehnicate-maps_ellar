@@ -8,13 +8,19 @@ import "leaflet-doubletapdragzoom";
 import { supabase } from "../../utils/supabase";
 
 const H3_RES = 9;
-const CITIES = ["Chennai", "Surat", "Bangalore", "Mumbai", "Hyderabad", "Pune", "Kolkata"];
-const CITIES_LOOP = [...CITIES, CITIES[0]];
-const INDIA_BOUNDS = [[6.4, 68.0], [37.9, 97.5]]; // SW, NE corners
-const QUICK_ZOOM_TARGETS = [
+const CITY_LOCATIONS = [
   { label: "Chennai",   lat: 13.0827, lon: 80.2707, zoom: 12 },
+  { label: "Surat",     lat: 21.1702, lon: 72.8311, zoom: 12 },
   { label: "Bangalore", lat: 12.9716, lon: 77.5946, zoom: 12 },
+  { label: "Mumbai",    lat: 19.0760, lon: 72.8777, zoom: 12 },
+  { label: "Hyderabad", lat: 17.3850, lon: 78.4867, zoom: 12 },
+  { label: "Pune",      lat: 18.5204, lon: 73.8567, zoom: 12 },
+  { label: "Kolkata",   lat: 22.5726, lon: 88.3639, zoom: 12 },
 ];
+const CITY_COVERAGE_RADIUS_KM = 25;
+const CITY_SHEET_COLLAPSED_HEIGHT = 92;
+const CITY_SHEET_ROW_HEIGHT = 43;
+const CITY_SHEET_FOOTER_HEIGHT = 58;
 const MERCHANT_LOCATIONS = [
   {
     lat: 13.0360349,
@@ -62,6 +68,33 @@ function haversineKm(lat1, lon1, lat2, lon2) {
   const a = Math.sin(dLat / 2) ** 2 +
     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(a));
+}
+async function fetchCityCoverage() {
+  const cities = await Promise.all(CITY_LOCATIONS.map(async (city) => {
+    const latDelta = CITY_COVERAGE_RADIUS_KM / 111.32;
+    const lonDelta = CITY_COVERAGE_RADIUS_KM / (111.32 * Math.cos(city.lat * Math.PI / 180));
+    const { count, error } = await supabase
+      .from("hexagons")
+      .select("h3_index", { count: "exact", head: true })
+      .gte("lat", city.lat - latDelta)
+      .lte("lat", city.lat + latDelta)
+      .gte("lon", city.lon - lonDelta)
+      .lte("lon", city.lon + lonDelta);
+
+    if (error) {
+      console.error(`[supabase] ${city.label} coverage:`, error);
+      return null;
+    }
+    if (count === null) {
+      console.error(`[supabase] ${city.label} coverage count was unavailable`);
+      return null;
+    }
+    return { ...city, coverageCount: count };
+  }));
+
+  return cities
+    .filter((city) => city && city.coverageCount > 0)
+    .sort((a, b) => b.coverageCount - a.coverageCount || a.label.localeCompare(b.label));
 }
 function estimateH3CellCount(bounds, res) {
   const north = bounds.getNorth(), south = bounds.getSouth();
@@ -660,45 +693,7 @@ const styles = `
     position: relative;
     z-index: 2;
   }
-  #rdm-placeholder {
-    position: absolute;
-    left: 58px;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 14px;
-    color: rgba(255, 255, 255, 0.55);
-    pointer-events: none;
-    display: flex;
-    gap: 5px;
-    align-items: center;
-    white-space: nowrap;
-    z-index: 1;
-    transition: color 0.3s ease;
-  }
-  #rdm-city-rotator { height: 20px; overflow: hidden; }
-  #rdm-city-inner {
-    display: flex;
-    flex-direction: column;
-    animation: rdm-scroll 18.6s linear infinite;
-  }
-  @keyframes rdm-scroll {
-    0%      { transform: translateY(0); }
-    10%     { transform: translateY(0); }
-    14.3%   { transform: translateY(-20px); }
-    24.3%   { transform: translateY(-20px); }
-    28.6%   { transform: translateY(-40px); }
-    38.6%   { transform: translateY(-40px); }
-    42.9%   { transform: translateY(-60px); }
-    52.9%   { transform: translateY(-60px); }
-    57.1%   { transform: translateY(-80px); }
-    67.1%   { transform: translateY(-80px); }
-    71.4%   { transform: translateY(-100px); }
-    81.4%   { transform: translateY(-100px); }
-    85.7%   { transform: translateY(-120px); }
-    95.7%   { transform: translateY(-120px); }
-    100%    { transform: translateY(-140px); }
-  }
-  #rdm-city-inner span { height: 20px; line-height: 20px; display: block; }
+  #rdm-search-input::placeholder { color: rgba(255, 255, 255, 0.55); }
 
   /* Dropdown */
   #rdm-dropdown {
@@ -725,6 +720,66 @@ const styles = `
     text-overflow: ellipsis;
   }
   .rdm-result:hover { background: rgba(168, 85, 247, 0.18); color: white; }
+
+  /* ── Covered cities ── */
+  #rdm-city-nav {
+    position: absolute;
+    top: 80px;
+    left: 20px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: fit-content;
+    max-height: calc(100% - 100px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    align-items: flex-start;
+  }
+  #rdm-city-nav::-webkit-scrollbar { display: none; }
+  .rdm-city-bubble {
+    box-sizing: border-box;
+    width: max-content;
+    max-width: none;
+    flex: 0 0 auto;
+    min-height: 38px;
+    padding: 8px 15px;
+    border-radius: 99px;
+    background: rgba(20, 20, 30, 0.88);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    box-shadow: 0 5px 18px rgba(0, 0, 0, 0.25);
+    color: rgba(255, 255, 255, 0.9);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s, border-color 0.2s, transform 0.2s;
+  }
+  .rdm-city-bubble:hover {
+    background: rgba(168, 85, 247, 0.3);
+    border-color: rgba(168, 85, 247, 0.75);
+    transform: translateX(2px);
+  }
+  .theme-light .rdm-city-bubble {
+    background: rgba(18, 18, 28, 0.88);
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+  .rdm-city-sheet-message {
+    padding: 9px 0;
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 12px;
+  }
+  #rdm-city-sheet { display: none; }
 
   /* ── Top-right control row (desktop) ── */
   #rdm-controls-row {
@@ -929,7 +984,6 @@ const styles = `
   .theme-light #rdm-search-box { background: rgba(18,18,28,0.82); box-shadow: 0 8px 30px rgba(0,0,0,0.18); }
   .theme-light #rdm-search-box::after { background-image: url('/hn-logo_light.png'); }
   .theme-light #rdm-search-input { color: #fff; }
-  .theme-light #rdm-placeholder { color: rgba(255,255,255,0.45); }
   .theme-light #rdm-dropdown { background: rgba(18,18,28,0.96); border: 1px solid rgba(255,255,255,0.1); }
   .theme-light .rdm-result { color: rgba(255,255,255,0.85); }
   .theme-light .rdm-result:hover { color: #fff; }
@@ -1032,11 +1086,103 @@ const styles = `
       border-radius: 10px;
     }
     #rdm-search-input { font-size: 13px; }
-    #rdm-placeholder { left: 50px; font-size: 13px; }
 
     /* Dropdown stays below search */
     #rdm-dropdown { border-radius: 12px; }
 
+    #rdm-city-nav { display: none; }
+    #rdm-city-sheet {
+      position: absolute;
+      z-index: 1002;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      display: block;
+      box-sizing: border-box;
+      padding: 0 14px calc(8px + env(safe-area-inset-bottom));
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-bottom: 0;
+      border-radius: 20px 20px 0 0;
+      background: #14141e;
+      box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.3);
+      overflow: hidden;
+      transition: height 240ms cubic-bezier(0.2, 0.75, 0.25, 1);
+      touch-action: none;
+    }
+    #rdm-city-sheet.is-dragging { transition: none; }
+    #rdm-city-sheet.is-expanded { display: flex; flex-direction: column; }
+    #rdm-city-sheet.is-bouncing {
+      transition: height 420ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .theme-light #rdm-city-sheet {
+      background: #12121c;
+      border-color: rgba(0, 0, 0, 0.14);
+    }
+    .rdm-city-sheet-handle {
+      display: flex;
+      width: 100%;
+      height: 30px;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      cursor: grab;
+      touch-action: none;
+    }
+    .rdm-city-sheet-handle:active { cursor: grabbing; }
+    .rdm-city-sheet-grip {
+      width: 42px;
+      height: 5px;
+      border-radius: 99px;
+      background: rgba(255, 255, 255, 0.65);
+    }
+    .rdm-city-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 9px;
+      flex: 0 1 auto;
+      min-height: 0;
+      align-content: start;
+      align-items: start;
+      justify-items: start;
+      overflow-y: auto;
+      padding-bottom: 4px;
+    }
+    #rdm-city-sheet.is-expanded .rdm-city-grid { flex: 1 1 auto; }
+    .rdm-city-grid .rdm-city-bubble {
+      min-width: 0;
+      min-height: 34px;
+      height: 34px;
+      justify-self: start;
+      align-self: start;
+      padding: 7px 6px;
+      font-size: 11px;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      overflow: hidden;
+    }
+    .rdm-city-sheet-message {
+      grid-column: 1 / -1;
+      text-align: center;
+    }
+    .rdm-city-sheet-footer {
+      display: none;
+      flex: 0 0 auto;
+      padding: 10px 2px 2px;
+      border-top: 1px solid rgba(255, 255, 255, 0.12);
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 11px;
+      line-height: 1.45;
+      text-align: center;
+    }
+    #rdm-city-sheet.is-expanded .rdm-city-sheet-footer { display: block; }
+    .rdm-city-sheet-footer a {
+      color: #c084fc;
+      font-weight: 600;
+      text-decoration: none;
+    }
+    .rdm-city-sheet-footer a:hover { color: #f0abfc; }
 
     /* Last-detected — below search bar, same left edge */
     #rdm-last-detected {
@@ -1060,12 +1206,13 @@ const styles = `
        ════════════════════════════════════════════════ */
     #rdm-filter-panel {
       top: auto;
-      bottom: 24px;
+      bottom: 170px;
       right: 12px;
       left: auto;
       width: 150px;
       padding: 10px 14px 10px;
       border-radius: 16px;
+      z-index: 999;
     }
 
     #rdm-filter-title { display: none; }
@@ -1108,11 +1255,19 @@ const styles = `
 
     /* Legend stays bottom-left */
     #rdm-legend {
-      bottom: 24px;
+      bottom: 170px;
       left: 12px;
       padding: 10px 12px 8px;
+      z-index: 999;
     }
     #rdm-legend-captions { font-size: 9.5px; }
+    .leaflet-bottom.leaflet-right {
+      position: fixed !important;
+      right: 0 !important;
+      bottom: 96px !important;
+      left: auto !important;
+      z-index: 1001 !important;
+    }
 
     /* Popup tweaks */
     .leaflet-popup { max-width: 92vw !important; }
@@ -1159,42 +1314,7 @@ const styles = `
     0%   { transform: scale(0.5); opacity: 0.9; }
     100% { transform: scale(2.2); opacity: 0; }
   }
-  #rdm-quicknav {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 0;
-  right: 0;
-  background: rgba(20, 20, 30, 0.96);
-  backdrop-filter: blur(16px);
-  border-radius: 22px;
-  padding: 12px 16px 14px;
-  box-shadow: 0 8px 25px rgba(0,0,0,0.5);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  z-index: 1001;
-}
-.rdm-quicknav-heading {
-  font-size: 11px;
-  font-weight: 600;
-  color: rgba(255,255,255,0.5);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin: 8px 0 6px;
-}
-.rdm-quicknav-heading:first-child { margin-top: 0; }
-.rdm-quicknav-chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.rdm-quicknav-chip {
-  padding: 7px 14px;
-  border-radius: 14px;
-  background: rgba(255,255,255,0.08);
-  border: 1px solid rgba(255,255,255,0.18);
-  color: rgba(255,255,255,0.85);
-  font-size: 13px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.2s, border-color 0.2s, color 0.2s;
-}
-.rdm-quicknav-chip:hover { background: rgba(168,85,247,0.22); border-color: rgba(168,85,247,0.6); color: #fff; }
-.theme-light #rdm-quicknav { background: rgba(18,18,28,0.96); border: 1px solid rgba(255,255,255,0.1); }
+  .theme-light #rdm-search-input::placeholder { color: rgba(255, 255, 255, 0.45); }
 `;
 
 // ─── Sun / Moon icons ──────────────────────────────────────────────────────────
@@ -1248,13 +1368,11 @@ function LegendTrack() {
 }
 
 // ─── Search bar ───────────────────────────────────────────────────────────────
-function SearchBar({ onSelect, onQuickNav }) {
+function SearchBar({ onSelect }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [focused, setFocused] = useState(false);
   const timerRef = useRef(null);
-
-  const showQuickNav = focused && query.length === 0;
 
   const search = useCallback(async (q) => {
     if (q.length < 3) { setResults([]); return; }
@@ -1281,10 +1399,6 @@ function SearchBar({ onSelect, onQuickNav }) {
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => search(val), 400);
   };
-  const handleQuickPick = (target) => {
-    onQuickNav(target);
-    setFocused(false);
-  };
   const handlePick = (r) => {
     onSelect(r.lat, r.lon, r.label.split(",")[0]);
     setQuery(r.label.split(",")[0]);
@@ -1299,51 +1413,13 @@ function SearchBar({ onSelect, onQuickNav }) {
           id="rdm-search-input"
           type="text"
           value={query}
+          placeholder="Search"
           onChange={handleChange}
           onFocus={() => setFocused(true)}
           onBlur={() => setTimeout(() => { setFocused(false); }, 250)}
           autoComplete="off"
         />
-        {!focused && !query && (
-          <div id="rdm-placeholder">
-            <span>Search</span>
-            <div id="rdm-city-rotator">
-              <div id="rdm-city-inner">
-                {CITIES_LOOP.map((c, i) => (
-                  <span key={i}>{c}</span>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
       </div>
-      {showQuickNav && (
-        <div id="rdm-quicknav">
-          <div className="rdm-quicknav-heading">Zoom in to:</div>
-          <div className="rdm-quicknav-chips">
-            {QUICK_ZOOM_TARGETS.map((t) => (
-              <div
-                key={t.label}
-                className="rdm-quicknav-chip"
-                onMouseDown={(e) => { e.preventDefault(); handleQuickPick(t); }}
-                onTouchEnd={(e) => { e.preventDefault(); handleQuickPick(t); }}
-              >
-                {t.label}
-              </div>
-            ))}
-          </div>
-          <div className="rdm-quicknav-heading">Zoom out to:</div>
-          <div className="rdm-quicknav-chips">
-            <div
-              className="rdm-quicknav-chip"
-              onMouseDown={(e) => { e.preventDefault(); handleQuickPick({ country: true, label: "India" }); }}
-              onTouchEnd={(e) => { e.preventDefault(); handleQuickPick({ country: true, label: "India" }); }}
-            >
-              India
-            </div>
-          </div>
-        </div>
-      )}
       {results.length > 0 && focused && (
         <div id="rdm-dropdown">
           {results.map((r, i) => (
@@ -1382,6 +1458,117 @@ export default function RoadDefectsMap() {
 
   // ── Theme ───────────────────────────────────────────────────────────────────
   const [theme, setTheme] = useState("dark");
+  const [cityCoverage, setCityCoverage] = useState([]);
+  const [cityCoverageLoaded, setCityCoverageLoaded] = useState(false);
+  const [citySheetHeight, setCitySheetHeight] = useState(CITY_SHEET_COLLAPSED_HEIGHT);
+  const [citySheetDragging, setCitySheetDragging] = useState(false);
+  const [citySheetBouncing, setCitySheetBouncing] = useState(false);
+  const citySheetDragRef = useRef(null);
+  const citySheetBounceTimerRef = useRef(null);
+  const suppressCitySheetClickRef = useRef(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    fetchCityCoverage()
+      .then((cities) => {
+        if (isMounted) setCityCoverage(cities);
+      })
+      .catch((error) => {
+        console.error("[city coverage]", error);
+      })
+      .finally(() => {
+        if (isMounted) setCityCoverageLoaded(true);
+      });
+    return () => { isMounted = false; };
+  }, []);
+
+  useEffect(() => () => window.clearTimeout(citySheetBounceTimerRef.current), []);
+
+  const getExpandedCitySheetHeight = () => {
+    const rows = Math.ceil(Math.max(1, cityCoverage.length) / 3);
+    const contentHeight = 30 + rows * CITY_SHEET_ROW_HEIGHT + CITY_SHEET_FOOTER_HEIGHT + 8;
+    const mapHeight = mapDivRef.current?.clientHeight || window.innerHeight;
+    return Math.min(
+      Math.max(CITY_SHEET_COLLAPSED_HEIGHT, contentHeight),
+      mapHeight * 0.68,
+      480
+    );
+  };
+  const handleCitySelect = useCallback((city) => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.setView([city.lat, city.lon], city.zoom, { animate: true, duration: 1.2 });
+    setCitySheetHeight(CITY_SHEET_COLLAPSED_HEIGHT);
+  }, []);
+
+  const handleCitySheetPointerDown = (event) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    citySheetDragRef.current = {
+      startY: event.clientY,
+      startHeight: citySheetHeight,
+      moved: false,
+    };
+  };
+  const handleCitySheetPointerMove = (event) => {
+    const drag = citySheetDragRef.current;
+    if (!drag) return;
+    const delta = drag.startY - event.clientY;
+    if (Math.abs(delta) > 5) drag.moved = true;
+    if (!drag.moved) return;
+    setCitySheetDragging(true);
+    const expandedHeight = getExpandedCitySheetHeight();
+    const proposedHeight = drag.startHeight + delta;
+    const overTop = proposedHeight > expandedHeight;
+    const overBottom = proposedHeight < CITY_SHEET_COLLAPSED_HEIGHT;
+    drag.overshot ||= overTop || overBottom;
+    const height = overTop
+      ? expandedHeight + Math.min((proposedHeight - expandedHeight) * 0.16, 18)
+      : overBottom
+        ? CITY_SHEET_COLLAPSED_HEIGHT - Math.min((CITY_SHEET_COLLAPSED_HEIGHT - proposedHeight) * 0.16, 18)
+        : proposedHeight;
+    setCitySheetHeight(height);
+  };
+  const handleCitySheetPointerUp = () => {
+    const drag = citySheetDragRef.current;
+    if (!drag) return;
+    citySheetDragRef.current = null;
+    setCitySheetDragging(false);
+    suppressCitySheetClickRef.current = drag.moved;
+    if (drag.moved) {
+      window.setTimeout(() => { suppressCitySheetClickRef.current = false; }, 0);
+      const expandedHeight = getExpandedCitySheetHeight();
+      setCitySheetHeight((height) => height >= (CITY_SHEET_COLLAPSED_HEIGHT + expandedHeight) / 2
+        ? expandedHeight
+        : CITY_SHEET_COLLAPSED_HEIGHT);
+      if (drag.overshot) {
+        window.clearTimeout(citySheetBounceTimerRef.current);
+        setCitySheetBouncing(true);
+        citySheetBounceTimerRef.current = window.setTimeout(() => setCitySheetBouncing(false), 450);
+      }
+    }
+  };
+  const handleCitySheetClick = () => {
+    if (suppressCitySheetClickRef.current) {
+      suppressCitySheetClickRef.current = false;
+      return;
+    }
+    setCitySheetHeight((height) => height > CITY_SHEET_COLLAPSED_HEIGHT
+      ? CITY_SHEET_COLLAPSED_HEIGHT
+      : getExpandedCitySheetHeight());
+  };
+  const citySheetExpanded = citySheetHeight >= getExpandedCitySheetHeight();
+  const renderCityBubble = (city) => (
+    <button
+      key={city.label}
+      type="button"
+      className="rdm-city-bubble"
+      onClick={() => handleCitySelect(city)}
+      title={`${city.label} · ${city.coverageCount.toLocaleString()} covered records`}
+      aria-label={`Go to ${city.label}; ${city.coverageCount.toLocaleString()} covered records`}
+    >
+      {city.label}
+    </button>
+  );
 
   // ── Iris reveal transition ─────────────────────────────────────────────────
   const isAnimatingRef = useRef(false);
@@ -1792,15 +1979,6 @@ export default function RoadDefectsMap() {
     if (label) pin.bindTooltip(label, { direction: "top", offset: [0, -22] });
     searchPinRef.current = pin;
   }, []);
-  const handleQuickNav = useCallback((target) => {
-    const map = mapRef.current;
-    if (!map) return;
-    if (target.country) {
-      map.fitBounds(INDIA_BOUNDS, { animate: true, duration: 1.2 });
-    } else {
-      map.setView([target.lat, target.lon], target.zoom, { animate: true, duration: 1.2 });
-    }
-  }, []);
   // ── Refresh ────────────────────────────────────────────────────────────────
   const [refreshing, setRefreshing] = useState(false);
   const [tooZoomedOut, setTooZoomedOut] = useState(false);
@@ -1830,7 +2008,10 @@ export default function RoadDefectsMap() {
   return (
     <>
       <style>{styles}</style>
-      <div id="rdm-container" className={theme === "light" ? "theme-light" : ""}>
+      <div
+        id="rdm-container"
+        className={theme === "light" ? "theme-light" : ""}
+      >
         <div id="rdm-map" ref={mapDivRef} />
 
         {/* Iris reveal layer */}
@@ -1838,7 +2019,52 @@ export default function RoadDefectsMap() {
           <div id="rdm-iris-glow" style={{ position: "absolute", inset: 0 }} />
         </div>
 
-        <SearchBar onSelect={handleSearchSelect} onQuickNav={handleQuickNav} />
+        <SearchBar onSelect={handleSearchSelect} />
+        <div id="rdm-city-nav" aria-label="Covered cities">
+          {cityCoverage.map(renderCityBubble)}
+          {!cityCoverageLoaded && <span className="rdm-city-sheet-message">Loading cities…</span>}
+          {cityCoverageLoaded && cityCoverage.length === 0 && (
+            <span className="rdm-city-sheet-message">No city coverage available</span>
+          )}
+        </div>
+        <section
+          id="rdm-city-sheet"
+          className={[
+            citySheetDragging && "is-dragging",
+            citySheetBouncing && "is-bouncing",
+            citySheetExpanded && "is-expanded",
+          ].filter(Boolean).join(" ")}
+          style={{ height: `${citySheetHeight}px` }}
+          aria-label="Covered cities"
+        >
+          <button
+            type="button"
+            className="rdm-city-sheet-handle"
+            aria-label={citySheetHeight > CITY_SHEET_COLLAPSED_HEIGHT ? "Collapse city locations" : "Expand city locations"}
+            aria-expanded={citySheetHeight > CITY_SHEET_COLLAPSED_HEIGHT}
+            onPointerDown={handleCitySheetPointerDown}
+            onPointerMove={handleCitySheetPointerMove}
+            onPointerUp={handleCitySheetPointerUp}
+            onPointerCancel={handleCitySheetPointerUp}
+            onClick={handleCitySheetClick}
+          >
+            <span className="rdm-city-sheet-grip" aria-hidden="true" />
+          </button>
+          <div className="rdm-city-grid">
+            {(citySheetExpanded ? cityCoverage : cityCoverage.slice(0, 3)).map(renderCityBubble)}
+            {!cityCoverageLoaded && <span className="rdm-city-sheet-message">Loading cities…</span>}
+            {cityCoverageLoaded && cityCoverage.length === 0 && (
+              <span className="rdm-city-sheet-message">No city coverage available</span>
+            )}
+          </div>
+          <p className="rdm-city-sheet-footer">
+            Don&apos;t find your place?{" "}
+            <a href="https://play.google.com/store/apps/details?id=com.vehnway.app" target="_blank" rel="noopener noreferrer">
+              Download the vehnicate app
+            </a>{" "}
+            and drive through your area to put it on the map.
+          </p>
+        </section>
 
         {/* Only render last-detected when we have a real city */}
         {lastDetected && lastDetected.city && (
