@@ -17,7 +17,12 @@ const CITY_LOCATIONS = [
   { label: "Pune",      lat: 18.5204, lon: 73.8567, zoom: 12 },
   { label: "Kolkata",   lat: 22.5726, lon: 88.3639, zoom: 12 },
 ];
-const CITY_COVERAGE_RADIUS_KM = 25;
+const CITY_METRO_AREA_RADIUS_KM = 50;
+const CITY_DISCOVERY_GRID_SIZE = 0.25;
+const CITY_DISCOVERY_MIN_DISTANCE_KM = 20;
+const MAX_DISCOVERED_CITY_CANDIDATES = 8;
+const CITY_GEOCODE_CACHE_KEY = "rdm-city-geocode-cache-v2";
+const CITY_DATA_PAGE_SIZE = 1000;
 const CITY_SHEET_COLLAPSED_HEIGHT = 92;
 const CITY_SHEET_ROW_HEIGHT = 43;
 const CITY_SHEET_FOOTER_HEIGHT = 58;
@@ -70,31 +75,188 @@ function haversineKm(lat1, lon1, lat2, lon2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 async function fetchCityCoverage() {
-  const cities = await Promise.all(CITY_LOCATIONS.map(async (city) => {
-    const latDelta = CITY_COVERAGE_RADIUS_KM / 111.32;
-    const lonDelta = CITY_COVERAGE_RADIUS_KM / (111.32 * Math.cos(city.lat * Math.PI / 180));
-    const { count, error } = await supabase
+  const { data: firstPage, count, error } = await supabase
+    .from("hexagons")
+    .select("lat, lon", { count: "exact" })
+    .range(0, CITY_DATA_PAGE_SIZE - 1);
+  if (error) {
+    console.error("[supabase] city coverage data:", error);
+    throw error;
+  }
+  if (count === null) {
+    throw new Error("City coverage record count was unavailable");
+  }
+
+  const pageStarts = [];
+  for (let start = CITY_DATA_PAGE_SIZE; start < count; start += CITY_DATA_PAGE_SIZE) {
+    pageStarts.push(start);
+  }
+  const remainingPages = await Promise.all(pageStarts.map(async (start) => {
+    const { data, error: pageError } = await supabase
       .from("hexagons")
-      .select("h3_index", { count: "exact", head: true })
-      .gte("lat", city.lat - latDelta)
-      .lte("lat", city.lat + latDelta)
-      .gte("lon", city.lon - lonDelta)
-      .lte("lon", city.lon + lonDelta);
-
-    if (error) {
-      console.error(`[supabase] ${city.label} coverage:`, error);
-      return null;
+      .select("lat, lon")
+      .range(start, Math.min(start + CITY_DATA_PAGE_SIZE - 1, count - 1));
+    if (pageError) {
+      console.error("[supabase] city coverage page:", pageError);
+      throw pageError;
     }
-    if (count === null) {
-      console.error(`[supabase] ${city.label} coverage count was unavailable`);
-      return null;
-    }
-    return { ...city, coverageCount: count };
+    return data || [];
   }));
+  const records = [...(firstPage || []), ...remainingPages.flat()]
+    .filter(({ lat, lon }) => lat !== null && lat !== undefined && lon !== null && lon !== undefined)
+    .map(({ lat, lon }) => ({ lat: Number(lat), lon: Number(lon) }))
+    .filter(({ lat, lon }) => Number.isFinite(lat) && Number.isFinite(lon));
 
-  return cities
-    .filter((city) => city && city.coverageCount > 0)
+  const knownCities = CITY_LOCATIONS.map((city) => {
+    const cityRecords = records.filter(({ lat, lon }) =>
+      haversineKm(lat, lon, city.lat, city.lon) <= CITY_METRO_AREA_RADIUS_KM
+    );
+    return {
+      ...city,
+      coverageCount: cityRecords.length,
+      bounds: getRecordBounds(cityRecords),
+    };
+  }).filter((city) => city.coverageCount > 0);
+
+  const discoveredCities = await discoverCitiesFromRecords(records);
+  return [...knownCities, ...discoveredCities]
     .sort((a, b) => b.coverageCount - a.coverageCount || a.label.localeCompare(b.label));
+}
+
+function getCityDiscoveryCandidates(records) {
+  const buckets = new Map();
+  records.forEach(({ lat, lon }) => {
+    if (CITY_LOCATIONS.some((city) => haversineKm(lat, lon, city.lat, city.lon) <= CITY_METRO_AREA_RADIUS_KM)) {
+      return;
+    }
+    const latCell = Math.floor(lat / CITY_DISCOVERY_GRID_SIZE);
+    const lonCell = Math.floor(lon / CITY_DISCOVERY_GRID_SIZE);
+    const key = `${latCell}:${lonCell}`;
+    const bucket = buckets.get(key) || {
+      key,
+      count: 0,
+      latTotal: 0,
+      lonTotal: 0,
+      south: lat,
+      north: lat,
+      west: lon,
+      east: lon,
+    };
+    bucket.count += 1;
+    bucket.latTotal += lat;
+    bucket.lonTotal += lon;
+    bucket.south = Math.min(bucket.south, lat);
+    bucket.north = Math.max(bucket.north, lat);
+    bucket.west = Math.min(bucket.west, lon);
+    bucket.east = Math.max(bucket.east, lon);
+    buckets.set(key, bucket);
+  });
+
+  const candidates = [...buckets.values()]
+    .map((bucket) => ({
+      key: bucket.key,
+      coverageCount: bucket.count,
+      lat: bucket.latTotal / bucket.count,
+      lon: bucket.lonTotal / bucket.count,
+      zoom: 12,
+      bounds: [[bucket.south, bucket.west], [bucket.north, bucket.east]],
+    }))
+    .sort((a, b) => b.coverageCount - a.coverageCount);
+
+  const selected = [];
+  for (const candidate of candidates) {
+    if (selected.every((city) =>
+      haversineKm(candidate.lat, candidate.lon, city.lat, city.lon) > CITY_DISCOVERY_MIN_DISTANCE_KM
+    )) {
+      selected.push(candidate);
+      if (selected.length >= MAX_DISCOVERED_CITY_CANDIDATES) break;
+    }
+  }
+  return selected;
+}
+
+function getRecordBounds(records) {
+  if (records.length === 0) return null;
+  return records.reduce((bounds, { lat, lon }) => [
+    [Math.min(bounds[0][0], lat), Math.min(bounds[0][1], lon)],
+    [Math.max(bounds[1][0], lat), Math.max(bounds[1][1], lon)],
+  ], [[records[0].lat, records[0].lon], [records[0].lat, records[0].lon]]);
+}
+
+function mergeCityBounds(first, second) {
+  if (!first) return second;
+  if (!second) return first;
+  return [
+    [Math.min(first[0][0], second[0][0]), Math.min(first[0][1], second[0][1])],
+    [Math.max(first[1][0], second[1][0]), Math.max(first[1][1], second[1][1])],
+  ];
+}
+
+function readCityGeocodeCache() {
+  try {
+    const cached = window.localStorage.getItem(CITY_GEOCODE_CACHE_KEY);
+    return cached ? JSON.parse(cached) : {};
+  } catch (error) {
+    console.warn("[city coverage] unable to read geocode cache:", error);
+    return {};
+  }
+}
+
+function writeCityGeocodeCache(cache) {
+  try {
+    const entries = Object.entries(cache).slice(-100);
+    window.localStorage.setItem(CITY_GEOCODE_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch (error) {
+    console.warn("[city coverage] unable to save geocode cache:", error);
+  }
+}
+
+async function reverseGeocodeCityName(lat, lon) {
+  const params = new URLSearchParams({ lat: String(lat), lon: String(lon), format: "json", zoom: "10" });
+  const response = await fetch(`https://nominatim.openstreetmap.org/reverse?${params}`, {
+    headers: { "Accept-Language": "en" },
+  });
+  if (!response.ok) {
+    throw new Error(`City reverse geocoding failed: ${response.status}`);
+  }
+  const data = await response.json();
+  const address = data.address || {};
+  return address.city || address.town || address.municipality || null;
+}
+
+async function discoverCitiesFromRecords(records) {
+  const cache = readCityGeocodeCache();
+  const discovered = new Map();
+  let lastRequestAt = 0;
+
+  for (const candidate of getCityDiscoveryCandidates(records)) {
+    let label = cache[candidate.key];
+    if (!label) {
+      const waitMs = Math.max(0, 1100 - (Date.now() - lastRequestAt));
+      if (waitMs) await new Promise((resolve) => window.setTimeout(resolve, waitMs));
+      try {
+        label = await reverseGeocodeCityName(candidate.lat, candidate.lon);
+      } catch (error) {
+        console.error(`[city coverage] reverse geocoding ${candidate.key}:`, error);
+        lastRequestAt = Date.now();
+        continue;
+      }
+      lastRequestAt = Date.now();
+      if (label) cache[candidate.key] = label;
+    }
+    if (!label) continue;
+
+    const existing = [...discovered.values()].find((city) => city.label.toLowerCase() === label.toLowerCase());
+    if (existing) {
+      existing.coverageCount += candidate.coverageCount;
+      existing.bounds = mergeCityBounds(existing.bounds, candidate.bounds);
+    } else if (!CITY_LOCATIONS.some((city) => city.label.toLowerCase() === label.toLowerCase())) {
+      discovered.set(candidate.key, { ...candidate, label });
+    }
+  }
+
+  writeCityGeocodeCache(cache);
+  return [...discovered.values()];
 }
 function estimateH3CellCount(bounds, res) {
   const north = bounds.getNorth(), south = bounds.getSouth();
@@ -622,7 +784,7 @@ const styles = `
     backdrop-filter: blur(14px);
     border: 1px solid rgba(255, 255, 255, 0.22);
     z-index: 999;
-    pointer-events: none;
+    pointer-events: auto;
     white-space: nowrap;
     font-size: 11.5px;
     font-weight: 500;
@@ -631,6 +793,10 @@ const styles = `
     display: flex;
     align-items: center;
     transition: background 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+    cursor: pointer;
+    text-align: center;
+    font: inherit;
+    font-size: 11.5px;
   }
   #rdm-last-detected b { color: #fff; font-weight: 700; }
 
@@ -640,7 +806,7 @@ const styles = `
     top: 20px;
     left: 20px;
     width: 340px;
-    z-index: 1000;
+    z-index: 1001;
   }
 
   #rdm-search-box {
@@ -1198,6 +1364,7 @@ const styles = `
       white-space: normal;
       text-align: left;
       display: block;
+      text-align: left;
     }
 
     /* ════════════════════════════════════════════════
@@ -1497,7 +1664,12 @@ export default function RoadDefectsMap() {
   const handleCitySelect = useCallback((city) => {
     const map = mapRef.current;
     if (!map) return;
-    map.setView([city.lat, city.lon], city.zoom, { animate: true, duration: 1.2 });
+    if (city.bounds) {
+      const center = L.latLngBounds(city.bounds).getCenter();
+      map.setView(center, MIN_ZOOM_FOR_FETCH, { animate: true, duration: 1.2 });
+    } else {
+      map.setView([city.lat, city.lon], MIN_ZOOM_FOR_FETCH, { animate: true, duration: 1.2 });
+    }
     setCitySheetHeight(CITY_SHEET_COLLAPSED_HEIGHT);
   }, []);
 
@@ -1697,8 +1869,14 @@ export default function RoadDefectsMap() {
     if (!city) return;
 
     const dateStr = formatISTDate(result.startTime);
-    setLastDetected({ city, locality, dateStr });
+    setLastDetected({ city, locality, dateStr, lat: result.lat, lon: result.lon });
   }, []);
+
+  const handleLastDetectedClick = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || !lastDetected || !Number.isFinite(lastDetected.lat) || !Number.isFinite(lastDetected.lon)) return;
+    map.setView([lastDetected.lat, lastDetected.lon], 14, { animate: true, duration: 1.2 });
+  }, [lastDetected]);
 
   // ── Initialize Leaflet ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -2068,10 +2246,16 @@ export default function RoadDefectsMap() {
 
         {/* Only render last-detected when we have a real city */}
         {lastDetected && lastDetected.city && (
-          <div id="rdm-last-detected">
+          <button
+            id="rdm-last-detected"
+            type="button"
+            onClick={handleLastDetectedClick}
+            aria-label={`Go to latest data location: ${lastDetected.city}${lastDetected.locality ? `, ${lastDetected.locality}` : ""}`}
+            title="Go to the latest data location"
+          >
             last felt: <b>{lastDetected.city}</b>
             {lastDetected.locality ? <>, {lastDetected.locality}</> : null}, {lastDetected.dateStr}
-          </div>
+          </button>
         )}
 
         {/* Controls: theme toggle + refresh (desktop: top-right row; mobile: same but icon-only refresh) */}
