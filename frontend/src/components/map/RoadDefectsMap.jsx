@@ -725,6 +725,12 @@ const styles = `
   #rdm-container.theme-light #rdm-map .leaflet-tile-pane {
     filter: invert(1) hue-rotate(180deg) brightness(1.04) contrast(0.92) saturate(0.85) grayscale(1);
   }
+  #rdm-map .leaflet-labels-pane {
+    filter: none;
+  }
+  #rdm-container.theme-light #rdm-map .leaflet-labels-pane {
+    filter: invert(1);
+  }
 
   #rdm-iris-layer {
     position: absolute;
@@ -1911,6 +1917,13 @@ export default function RoadDefectsMap() {
       L.tileLayer(
         "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=cb1_2gzd_1_d14af46dbfbc5d8f214caf08",
         { attribution: "© OpenStreetMap contributors © CARTO", subdomains: "abcd", maxZoom: 20 }
+      ).addTo(map);
+
+      map.createPane("labelsPane");
+      map.getPane("labelsPane").style.zIndex = "250";
+      L.tileLayer(
+        "https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png?key=cb1_2gzd_1_d14af46dbfbc5d8f214caf08",
+        { subdomains: "abcd", maxZoom: 20, pane: "labelsPane" }
       ).addTo(map);
       
       MERCHANT_LOCATIONS.forEach((m) => {
