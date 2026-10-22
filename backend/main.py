@@ -7,9 +7,12 @@ import math
 import time
 import queue
 import threading
+from contextlib import closing
 import httpx
 from supabase import create_client, ClientOptions
 import httpcore
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from aliv_module import AlivRoadDefects
 import h3 as h3lib
 import os
@@ -68,6 +71,7 @@ load_dotenv()
 
 SOURCE_URL = os.environ.get("SOURCE_URL")
 SOURCE_KEY = os.environ.get("SOURCE_KEY")
+SOURCE_DATABASE_URL = os.environ.get("SOURCE_DATABASE_URL")
 TARGET_URL = os.environ.get("TARGET_URL")
 TARGET_KEY = os.environ.get("TARGET_KEY")
 
@@ -226,6 +230,7 @@ def fetch_all_pages(
 ) -> list:
     all_data = []
     start = 0
+    cursor = None
     while True:
         query = supabase_client.table(table).select("*")
         for method, *args in filters:
@@ -233,9 +238,26 @@ def fetch_all_pages(
         query = query.order(order_col, desc=False)
         if tiebreak_col:
             query = query.order(tiebreak_col, desc=False)   # deterministic tiebreak
-        batch = _execute_with_retry(
-            query.range(start, start + page_size - 1)
-        ).data
+            if cursor is not None:
+                last_order_value, last_tiebreak_value = cursor
+                query = query.or_(
+                    f"{order_col}.gt.{last_order_value},"
+                    f"and({order_col}.eq.{last_order_value},"
+                    f"{tiebreak_col}.gt.{last_tiebreak_value})"
+                )
+            page_range = (0, page_size - 1)
+        else:
+            page_range = (start, start + page_size - 1)
+        try:
+            batch = _execute_with_retry(
+                query.range(*page_range)
+            ).data
+        except Exception as err:
+            position = f"after {cursor!r}" if tiebreak_col else f"row {start}"
+            print(
+                f"[fetch_all_pages] {table} page starting {position} failed: {err!r}"
+            )
+            raise
 
         if not batch:
             break
@@ -245,10 +267,76 @@ def fetch_all_pages(
         if len(batch) < page_size:
             break
 
-        start += page_size
+        if tiebreak_col:
+            last_row = batch[-1]
+            cursor = (last_row[order_col], last_row[tiebreak_col])
+            if cursor[0] is None or cursor[1] is None:
+                raise ValueError(
+                    f"{table} keyset columns {order_col} and {tiebreak_col} "
+                    "must not contain null values"
+                )
+        else:
+            start += page_size
 
     print(f"[fetch_all_pages] {table}: total rows fetched = {len(all_data)}")
     return all_data
+
+
+_SENSOR_TABLE_KEYS = {
+    "imu_data": ("timestamp_ms", "imu_data_id"),
+    "gps_data": ("timestamp_ms", "gps_id"),
+}
+
+
+def fetch_sensor_rows(connection, table: str, session_id: str, page_size: int = 1000) -> list:
+    """Fetch a session's sensor rows from PostgreSQL using composite keyset pagination."""
+    try:
+        order_col, tiebreak_col = _SENSOR_TABLE_KEYS[table]
+    except KeyError:
+        raise ValueError(f"Unsupported sensor table: {table}") from None
+
+    cursor_values = None
+    all_rows = []
+    page_number = 0
+    while True:
+        query = f"SELECT * FROM public.{table} WHERE session_id = %s "
+        params = [session_id]
+        if cursor_values is not None:
+            query += f"AND ({order_col}, {tiebreak_col}) > (%s, %s) "
+            params.extend(cursor_values)
+        query += f"ORDER BY {order_col} ASC, {tiebreak_col} ASC LIMIT %s"
+        params.append(page_size)
+
+        try:
+            with connection.cursor(cursor_factory=RealDictCursor) as db_cursor:
+                db_cursor.execute(query, params)
+                batch = db_cursor.fetchall()
+        except Exception as err:
+            print(
+                f"[fetch_sensor_rows] {table} page {page_number} "
+                f"after {cursor_values!r} failed: {err!r}"
+            )
+            raise
+
+        if not batch:
+            break
+
+        all_rows.extend(batch)
+        if len(batch) < page_size:
+            break
+
+        last_row = batch[-1]
+        cursor_values = (last_row[order_col], last_row[tiebreak_col])
+        if cursor_values[0] is None or cursor_values[1] is None:
+            raise ValueError(
+                f"{table} keyset columns {order_col} and {tiebreak_col} "
+                "must not contain null values"
+            )
+        page_number += 1
+
+    print(f"[fetch_sensor_rows] {table}: total rows fetched = {len(all_rows)}")
+    return all_rows
+
 
 def sanitize_for_json(obj):
     if isinstance(obj, float) and math.isnan(obj):
@@ -617,26 +705,23 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     if already_processed:
         print(f"[process_trip] session {session_id} already aliv_processed — will still re-check imu_only, will skip Aliv/hexagons/distance.")
     # ── 1. Fetch IMU data ──────────────────────────────────────────────────────
-    imu_rows = fetch_all_pages(
-        supabase_source,
-        table="imu_data",
-        filters=[("eq", "session_id", session_id)],
-        order_col="timestamp_ms",
-        tiebreak_col="imu_data_id",
-    )
-    print(f"[process_trip] IMU rows fetched: {len(imu_rows)}")
-    if not imu_rows:
-        print("[process_trip] No IMU data, skipping.")
-        return
+    if not SOURCE_DATABASE_URL:
+        raise RuntimeError("SOURCE_DATABASE_URL must be configured for sensor-data reads")
+    with closing(
+        psycopg2.connect(
+            SOURCE_DATABASE_URL,
+            connect_timeout=10,
+            sslmode="require",
+        )
+    ) as source_db:
+        imu_rows = fetch_sensor_rows(source_db, "imu_data", session_id)
+        print(f"[process_trip] IMU rows fetched: {len(imu_rows)}")
+        if not imu_rows:
+            print("[process_trip] No IMU data, skipping.")
+            return
 
-    # ── 2. Fetch GPS data ──────────────────────────────────────────────────────
-    gps_rows = fetch_all_pages(
-        supabase_source,
-        table="gps_data",
-        filters=[("eq", "session_id", session_id)],
-        order_col="timestamp_ms",
-        tiebreak_col="gps_id",
-    )
+        # ── 2. Fetch GPS data ──────────────────────────────────────────────────
+        gps_rows = fetch_sensor_rows(source_db, "gps_data", session_id)
     print(f"[process_trip] GPS rows fetched: {len(gps_rows)}")
     if not gps_rows:
         print("[process_trip] No GPS data, skipping.")

@@ -4,6 +4,7 @@ pandas
 numpy
 scipy
 supabase
+psycopg2-binary
 h3
 pydantic
 python-dotenv

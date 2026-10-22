@@ -2,4 +2,5 @@
 yaw.py
 backfill_jerk_values.py
 tests/
-migrations/
+migrations/*
+!migrations/20261022_add_session_data_processing_indexes.sql
