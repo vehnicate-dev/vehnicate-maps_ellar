@@ -1,12 +1,26 @@
 import math
+import os
 import threading
 import time
 import requests
 
 GRID = 0.1   # keep equal to CITY_DISCOVERY_GRID_SIZE in the frontend
 _NOMINATIM = "https://nominatim.openstreetmap.org/reverse"
+
+# Nominatim rejects generic/placeholder User-Agents (e.g. example.com addresses) with 403.
+# Set NOMINATIM_USER_AGENT in your env to something real, e.g. "vehnicate/1.0 (you@yourdomain.com)".
+_USER_AGENT = os.environ.get("NOMINATIM_USER_AGENT", "vehnicate/1.0 (vehnicate@gmail.com)")
+
 _geocode_lock = threading.Lock()   # trip worker + backfill share Nominatim's 1 req/sec budget
 _last_request = 0.0
+
+# ── Circuit breaker ─────────────────────────────────────────────────────────
+# A 403/429 means Nominatim is blocking/throttling us; retrying every bucket
+# only makes that worse. Stop calling it for a cooldown period instead.
+_BLOCK_COOLDOWN_S = 15 * 60       # pause geocoding this long after a 403/429
+_MAX_CONSECUTIVE_FAILURES = 5     # other errors (timeouts etc.) trip it after this many in a row
+_blocked_until = 0.0
+_consecutive_failures = 0
 
 
 def _run(query):
@@ -32,10 +46,20 @@ def points_to_buckets(points):
     return buckets
 
 
+def _trip_breaker(reason):
+    global _blocked_until, _consecutive_failures
+    _blocked_until = time.time() + _BLOCK_COOLDOWN_S
+    _consecutive_failures = 0
+    print(f"[geographies] {reason} — pausing geocoding for {_BLOCK_COOLDOWN_S // 60} min")
+
+
 def _reverse_geocode(lat, lon):
     """Returns {district, city, state} or None."""
-    global _last_request
+    global _last_request, _consecutive_failures
     with _geocode_lock:
+        if time.time() < _blocked_until:
+            return None   # breaker open: don't touch Nominatim
+
         wait = 1.1 - (time.time() - _last_request)
         if wait > 0:
             time.sleep(wait)
@@ -43,13 +67,21 @@ def _reverse_geocode(lat, lon):
             r = requests.get(
                 _NOMINATIM,
                 params={"lat": lat, "lon": lon, "format": "json", "zoom": 10, "addressdetails": 1},
-                headers={"User-Agent": "vehnicate/1.0 (your-email@example.com)", "Accept-Language": "en"},
+                headers={"User-Agent": _USER_AGENT, "Accept-Language": "en"},
                 timeout=10,
             )
             r.raise_for_status()
             a = r.json().get("address", {})
+            _consecutive_failures = 0
         except Exception as e:
             print(f"[geographies] geocode failed for {lat},{lon}: {e!r}")
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status in (403, 429):
+                _trip_breaker(f"Nominatim returned {status} (blocked/rate-limited)")
+            else:
+                _consecutive_failures += 1
+                if _consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    _trip_breaker(f"{_consecutive_failures} consecutive geocode failures")
             return None
         finally:
             _last_request = time.time()
