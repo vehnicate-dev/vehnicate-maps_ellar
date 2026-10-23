@@ -980,13 +980,14 @@ def _replay_all_sessions_inner():
         return
 
     sessions = fetch_all_pages(
-        supabase_source, table="sessions", filters=[], order_col="end_time",
+        supabase_source,
+        table="sessions",
+        filters=[("filter", "end_time", "not.is", "null")],   # drop null end_time server-side
+        order_col="end_time",
+        tiebreak_col="session_id",
     )
-    total_fetched = len(sessions)
-    sessions = [s for s in sessions if s.get("end_time")]
-    skipped = total_fetched - len(sessions)
-    print(f"[replay] {len(sessions)} sessions to reprocess (skipped {skipped} with null end_time), oldest end_time first")
-
+    print(f"[replay] {len(sessions)} sessions to reprocess, oldest end_time first")
+    
     for i, session in enumerate(sessions):
         session_id = session["session_id"]
         print(f"[replay] ({i + 1}/{len(sessions)}) session={session_id} end_time={session['end_time']}")
@@ -1033,8 +1034,10 @@ def _backfill_geographies_inner():
     supabase_source = _make_supabase_client(SOURCE_URL, SOURCE_KEY)
     supabase_target = _make_supabase_client(TARGET_URL, TARGET_KEY)
     sessions = fetch_all_pages(
-        supabase_source, table="sessions",
+        supabase_source,
+        table="sessions",
         filters=[("gte", "distance", MIN_TRIP_DISTANCE_M / 1000)],   # distance is stored in km
+        order_col="session_id",
     )
     print(f"[geographies-backfill] {len(sessions)} sessions with distance > 0")
     backfill_all_geographies(

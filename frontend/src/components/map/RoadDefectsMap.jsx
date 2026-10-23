@@ -108,34 +108,73 @@ async function reverseGeocodePlace(lat, lon) {
   };
 }
 
+// Place names the backend already resolved (public view: no user_ids)
+async function fetchSharedPlaces() {
+  const out = {};
+  const PAGE = 1000; // Supabase's default per-request row cap
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from("geographies_public")
+      .select("key,district,city,state")
+      .order("key")
+      .range(from, from + PAGE - 1);
+    if (error) { console.warn("[city coverage] geographies:", error); break; }
+    (data || []).forEach((r) => {
+      out[r.key] = { district: r.district, city: r.city, state: r.state };
+    });
+    if (!data || data.length < PAGE) break;
+  }
+  return out;
+}
+
+async function fetchCityCoverage(onCoverageUpdate) {
+  // Both queries run in parallel
+  const [buckets, shared] = await Promise.all([fetchCoverageBuckets(), fetchSharedPlaces()]);
+  const local = readCityGeocodeCache();
+  const placeByKey = new Map();
+  buckets.forEach((b) => {
+    const place = shared[b.key] || local[b.key];
+    if (place) placeByKey.set(b.key, place);
+  });
+  onCoverageUpdate(buildCityGroups(buckets, placeByKey)); // full list paints right away
+
+  // Fallback: only buckets the backend hasn't covered yet use browser geocoding
+  const missing = buckets.filter((b) => !placeByKey.has(b.key));
+  if (missing.length) {
+    let timer = null;
+    const publish = () => {        // throttle: rebuild groups at most once a second
+      if (timer) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        onCoverageUpdate(buildCityGroups(buckets, placeByKey));
+      }, 1000);
+    };
+    await resolveBucketPlaces(missing, placeByKey, publish);
+  }
+  return buildCityGroups(buckets, placeByKey);
+}
+
 async function resolveBucketPlaces(buckets, placeByKey, onResolved) {
   const cache = readCityGeocodeCache();
   let lastRequestAt = 0;
-
-  for (const bucket of buckets) {
-    let place = cache[bucket.key];
-    let fetched = false;
-    if (!place) {
-      const waitMs = Math.max(0, 1100 - (Date.now() - lastRequestAt)); // Nominatim: max 1 req/sec
-      if (waitMs) await new Promise((resolve) => window.setTimeout(resolve, waitMs));
-      try {
-        place = await reverseGeocodePlace(bucket.lat, bucket.lon);
-      } catch (error) {
-        console.error(`[city coverage] reverse geocoding ${bucket.key}:`, error);
-        lastRequestAt = Date.now();
-        continue;
-      }
-      lastRequestAt = Date.now();
-      if (place) {
-        cache[bucket.key] = place;
-        writeCityGeocodeCache(cache);
-      }
-      fetched = true;
+  let sinceSave = 0;
+  for (const bucket of buckets) { // already sorted by count, biggest cities first
+    const waitMs = Math.max(0, 1100 - (Date.now() - lastRequestAt)); // Nominatim: 1 req/sec
+    if (waitMs) await new Promise((r) => window.setTimeout(r, waitMs));
+    let place = null;
+    try {
+      place = await reverseGeocodePlace(bucket.lat, bucket.lon);
+    } catch (error) {
+      console.error(`[city coverage] reverse geocoding ${bucket.key}:`, error);
     }
+    lastRequestAt = Date.now();
     if (!place) continue;
+    cache[bucket.key] = place;
     placeByKey.set(bucket.key, place);
-    if (fetched) onResolved();
+    if (++sinceSave % 10 === 0) writeCityGeocodeCache(cache); // not after every result
+    onResolved();
   }
+  writeCityGeocodeCache(cache);
 }
 
 // ── Grouping helpers ──
@@ -235,19 +274,7 @@ async function fetchCoverageBuckets() {
     .sort((a, b) => b.count - a.count);
 }
 
-async function fetchCityCoverage(onCoverageUpdate) {
-  const buckets = await fetchCoverageBuckets();
-  const placeByKey = new Map();
 
-  // Paint instantly from the cache, then geocode only what's missing
-  const cache = readCityGeocodeCache();
-  buckets.forEach((b) => { if (cache[b.key]) placeByKey.set(b.key, cache[b.key]); });
-  onCoverageUpdate(buildCityGroups(buckets, placeByKey));
-
-  const publish = () => onCoverageUpdate(buildCityGroups(buckets, placeByKey));
-  await resolveBucketPlaces(buckets, placeByKey, publish);
-  return buildCityGroups(buckets, placeByKey);
-}
 
 
 
