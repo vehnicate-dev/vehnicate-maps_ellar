@@ -32,6 +32,53 @@ const MERCHANT_LOCATIONS = [
 const MIN_ZOOM_FOR_FETCH = 12;
 const MAX_DETAIL_CELLS = 40000; // safety valve — skip fetch if viewport would need more cells than this
 
+// Anything whose bucket centre is within radiusKm gets displayed as this city.
+// Add more entries for other metros if needed.
+const METRO_AREAS = [
+  {
+    label: "Chennai", state: "Tamil Nadu", lat: 13.0827, lon: 80.2707, radiusKm: 35,
+    aliases: [
+      "chennai", "tambaram", "avadi", "ambattur", "poonamallee", "pallavaram", "chromepet",
+      "thiruvottiyur", "tiruvottiyur", "madhavaram", "sholinganallur", "medavakkam",
+      "perungudi", "kundrathur", "sriperumbudur", "maraimalai nagar",
+    ],
+  },
+];
+const FOLD_SATELLITE_DISTRICTS = false; 
+function applyMetro(bucket, place) {
+  const names = [place?.city, place?.district].filter(Boolean).map((x) => x.toLowerCase());
+  const [[s, w], [n, e]] = bucket.bounds;
+  const points = [[bucket.lat, bucket.lon], [s, w], [s, e], [n, w], [n, e]];
+  for (const m of METRO_AREAS) {
+    const near = points.some(([la, lo]) => haversineKm(la, lo, m.lat, m.lon) <= m.radiusKm);
+    if (near || names.some((x) => m.aliases.includes(x))) {
+      return { district: m.label, city: m.label, state: m.state };
+    }
+  }
+  return place;
+}
+
+function metroFor(lat, lon) {
+  return METRO_AREAS.find((m) => haversineKm(lat, lon, m.lat, m.lon) <= m.radiusKm) || null;
+}
+
+// Key format is "<floor(lat/grid)>:<floor(lon/grid)>", so the cell can be rebuilt from the key alone.
+function bucketFromKey(key) {
+  const [i, j] = String(key).split(":").map(Number);
+  if (!Number.isFinite(i) || !Number.isFinite(j)) return null;
+  const g = CITY_DISCOVERY_GRID_SIZE;
+  const r = (n) => Math.round(n * 1e6) / 1e6;
+  const south = r(i * g), north = r((i + 1) * g);
+  const west = r(j * g), east = r((j + 1) * g);
+  return {
+    key,
+    count: 1, // name-only bucket: sorts after cities that have real data
+    lat: r((south + north) / 2),
+    lon: r((west + east) / 2),
+    bounds: [[south, west], [north, east]],
+  };
+}
+
 // ─── Color ramp ───────────────────────────────────────────────────────────────
 function getEventColor(param) {
   param = Math.max(0, Math.min(1, param));
@@ -128,21 +175,36 @@ async function fetchSharedPlaces() {
 }
 
 async function fetchCityCoverage(onCoverageUpdate) {
-  // Both queries run in parallel
-  const [buckets, shared] = await Promise.all([fetchCoverageBuckets(), fetchSharedPlaces()]);
+  const [rpcBuckets, shared] = await Promise.all([
+    fetchCoverageBuckets().catch((e) => { console.warn("[city coverage] buckets rpc:", e); return []; }),
+    fetchSharedPlaces(),
+  ]);
+  console.log("[city coverage] coimbatore rows:",
+  Object.entries(shared).filter(([, v]) => /coimbatore/i.test(`${v.district} ${v.city}`)));
+
+
+  // Union: buckets with real data from the RPC + every cell the backend has named
+  const byKey = new Map(rpcBuckets.map((b) => [b.key, b]));
+  for (const key of Object.keys(shared)) {
+    if (byKey.has(key)) continue;
+    const b = bucketFromKey(key);
+    if (b) byKey.set(key, b);
+  }
+  const buckets = [...byKey.values()].sort((a, b) => b.count - a.count);
+
   const local = readCityGeocodeCache();
   const placeByKey = new Map();
   buckets.forEach((b) => {
-    const place = shared[b.key] || local[b.key];
-    if (place) placeByKey.set(b.key, place);
+    const resolved = applyMetro(b, shared[b.key] || local[b.key]);
+    if (resolved) placeByKey.set(b.key, resolved);
   });
-  onCoverageUpdate(buildCityGroups(buckets, placeByKey)); // full list paints right away
+    onCoverageUpdate(buildCityGroups(buckets, placeByKey));
 
   // Fallback: only buckets the backend hasn't covered yet use browser geocoding
   const missing = buckets.filter((b) => !placeByKey.has(b.key));
   if (missing.length) {
     let timer = null;
-    const publish = () => {        // throttle: rebuild groups at most once a second
+    const publish = () => {
       if (timer) return;
       timer = window.setTimeout(() => {
         timer = null;
@@ -151,6 +213,8 @@ async function fetchCityCoverage(onCoverageUpdate) {
     };
     await resolveBucketPlaces(missing, placeByKey, publish);
   }
+  console.log("[city coverage] groups:",
+  buildCityGroups(buckets, placeByKey).map((g) => `${g.label} (${g.coverageCount})`));
   return buildCityGroups(buckets, placeByKey);
 }
 
@@ -170,7 +234,7 @@ async function resolveBucketPlaces(buckets, placeByKey, onResolved) {
     lastRequestAt = Date.now();
     if (!place) continue;
     cache[bucket.key] = place;
-    placeByKey.set(bucket.key, place);
+    placeByKey.set(bucket.key, applyMetro(bucket, place));
     if (++sinceSave % 10 === 0) writeCityGeocodeCache(cache); // not after every result
     onResolved();
   }
@@ -226,7 +290,7 @@ function buildCityGroups(buckets, placeByKey) {
     let target = groups.find((g) =>
       g.state === d.state && g.label.toLowerCase() === d.label.toLowerCase()
     );
-    if (!target) {
+    if (!target && FOLD_SATELLITE_DISTRICTS) {
       const dCentre = centroidOf(d.buckets);
       let bestDist = Infinity;
       for (const g of groups) {
@@ -1784,8 +1848,8 @@ export default function RoadDefectsMap() {
       type="button"
       className="rdm-city-bubble"
       onClick={() => handleCitySelect(city)}
-      title={`${city.label} · ${city.coverageCount.toLocaleString()} covered records`}
-      aria-label={`Go to ${city.label}; ${city.coverageCount.toLocaleString()} covered records`}
+      title={city.label}
+      aria-label={`Go to ${city.label}`}
     >
       {city.label}
     </button>
