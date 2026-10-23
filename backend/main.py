@@ -22,6 +22,8 @@ from zoneinfo import ZoneInfo
 from distance import compute_total_distance
 from map_matching import init_map_matcher, map_match_trip
 from velocity_jerk import estimate_velocity_jerk
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Header   # added Header
+from geographies import add_session_geographies, backfill_all_geographies
 
 IST = ZoneInfo("Asia/Kolkata")
 """
@@ -800,7 +802,18 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     except Exception as dist_err:
         print(f"[process_trip] distance update failed: {dist_err}")
 
-    # ── 3c. Increment cumulative distance in user_details ──────────────────────
+    # ── 3c-geo. Record which geographies this trip covered ──────────────────
+    try:
+        add_session_geographies(
+            supabase_target,
+            user_id,
+            zip(gps_df["latitude"], gps_df["longitude"]),   # raw fixes, still present after map matching
+            run=_execute_with_retry,
+        )
+    except Exception as geo_err:
+        print(f"[process_trip] geographies update failed: {geo_err!r}")   # never fail the trip over this
+
+    # ── 3d. Increment cumulative distance in user_details ──────────────────────
     try:
         resp = _execute_with_retry(
             supabase_target
@@ -1009,3 +1022,35 @@ def _replay_all_sessions_inner():
 def replay_all_sessions(background_tasks: BackgroundTasks):
     background_tasks.add_task(_replay_all_sessions_inner)
     return {"status": "replay started"}
+
+def _session_gps_points(session_id: str):
+    with closing(psycopg2.connect(SOURCE_DATABASE_URL, connect_timeout=10, sslmode="require")) as db:
+        rows = fetch_sensor_rows(db, "gps_data", session_id)
+    return [(r["latitude"], r["longitude"]) for r in rows]
+
+
+def _backfill_geographies_inner():
+    supabase_source = _make_supabase_client(SOURCE_URL, SOURCE_KEY)
+    supabase_target = _make_supabase_client(TARGET_URL, TARGET_KEY)
+    sessions = fetch_all_pages(
+        supabase_source, table="sessions",
+        filters=[("gte", "distance", MIN_TRIP_DISTANCE_M / 1000)],   # distance is stored in km
+    )
+    print(f"[geographies-backfill] {len(sessions)} sessions with distance > 0")
+    backfill_all_geographies(
+        supabase_target,
+        [(s["session_id"], s["user_id"]) for s in sessions],
+        _session_gps_points,
+        run=_execute_with_retry,
+    )
+
+
+@app.post("/backfill_geographies")
+def backfill_geographies(background_tasks: BackgroundTasks, x_api_key: str = Header(None)):
+    expected = os.environ.get("BACKFILL_API_KEY")
+    if not expected:
+        raise HTTPException(status_code=503, detail="BACKFILL_API_KEY not configured")
+    if x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    background_tasks.add_task(_backfill_geographies_inner)
+    return {"status": "backfill started"}
