@@ -1,33 +1,262 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo, useId } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "react-router-dom";
 import { supabase } from "../../utils/supabase";
 
+
 const MotionLink = motion(Link);
 const PAGE_SIZE = 1000;
 const REFRESH_INTERVAL_MS = 60_000;
-const DIGIT_SEGMENTS = {
-  0: ["a", "b", "c", "d", "e", "f"],
-  1: ["b", "c"],
-  2: ["a", "b", "g", "e", "d"],
-  3: ["a", "b", "g", "c", "d"],
-  4: ["f", "g", "b", "c"],
-  5: ["a", "f", "g", "c", "d"],
-  6: ["a", "f", "g", "e", "c", "d"],
-  7: ["a", "b", "c"],
-  8: ["a", "b", "c", "d", "e", "f", "g"],
-  9: ["a", "b", "c", "d", "f", "g"],
-  "-": ["g"],
+
+// ============================================================
+// DOT-MATRIX FONT, DEFINED AS PEN STROKES (5x7 grid)
+// Each stroke is a list of [col,row] waypoints in writing order.
+// ============================================================
+const STROKES = {
+  0: [[[2,0],[1,0],[0,1],[0,2],[0,3],[0,4],[0,5],[1,6],[2,6],[3,6],[4,5],[4,4],[4,3],[4,2],[4,1],[3,0]]],
+  1: [[[1,1],[2,0],[2,6]], [[1,6],[3,6]]],
+  2: [[[0,1],[1,0],[3,0],[4,1],[4,2],[0,6],[4,6]]],
+  3: [[[0,0],[4,0],[2,2],[3,3],[4,4],[4,5],[3,6],[1,6],[0,5]]],
+  4: [[[3,0],[0,4],[4,4]], [[3,0],[3,6]]],
+  5: [[[4,0],[0,0],[0,3],[3,3],[4,4],[4,5],[3,6],[1,6],[0,5]]],
+  6: [[[3,0],[1,1],[0,2],[0,5],[1,6],[3,6],[4,5],[4,4],[3,3],[1,3],[0,4]]],
+  7: [[[0,0],[4,0],[2,6]]],
+  8: [[[2,3],[1,2],[1,1],[2,0],[3,1],[3,2],[2,3],[1,4],[0,5],[1,6],[3,6],[4,5],[3,4],[2,3]]],
+  9: [[[4,2],[4,1],[3,0],[1,0],[0,1],[0,2],[1,3],[3,3],[4,2],[4,4],[3,5],[2,6],[1,6],[0,5]]],
+  "-": [[[0,3],[4,3]]],
+  ".": [[[0,6]]],
+  K: [[[0,0],[0,6]], [[4,0],[0,3],[4,6]]],
+  M: [[[0,6],[0,0],[2,3],[4,0],[4,6]]],
+  m: [[[0,2],[0,6]], [[0,3],[1,2],[2,3],[2,6]], [[2,3],[3,2],[4,3],[4,6]]],
+  i: [[[2,0]], [[1,2],[2,2],[2,6]], [[1,6],[3,6]]],
+  n: [[[0,2],[0,6]], [[0,3],[1,2],[3,2],[4,3],[4,6]]],
 };
-const SEGMENT_PATHS = {
-  a: "M6 2 H22 L25 5 L22 8 H6 L3 5 Z",
-  b: "M22 9 L25 12 V22 L22 25 L19 22 V12 Z",
-  c: "M22 25 L25 28 V38 L22 41 L19 38 V28 Z",
-  d: "M6 42 H22 L25 45 L22 48 H6 L3 45 Z",
-  e: "M3 28 L6 25 L9 28 V38 L6 41 L3 38 Z",
-  f: "M3 12 L6 9 L9 12 V22 L6 25 L3 22 Z",
-  g: "M6 22 H22 L25 25 L22 28 H6 L3 25 Z",
+
+const GLYPH_WIDTH = { ".": 1 };
+const ROWS = 7;
+const PITCH = 10; // svg units per dot cell
+const CHAR_GAP = 1; // empty columns between characters
+const DOT_STAGGER = 0.035; // seconds between consecutive dots while "writing"
+
+// walk the waypoints and turn them into an ordered, de-duplicated list of dots
+const buildGlyph = (strokes) => {
+  const seen = new Set();
+  const pts = [];
+  const add = (c, r) => {
+    const k = `${c},${r}`;
+    if (!seen.has(k)) {
+      seen.add(k);
+      pts.push([c, r]);
+    }
+  };
+
+  strokes.forEach((stroke) => {
+    if (stroke.length === 1) return add(stroke[0][0], stroke[0][1]);
+    for (let i = 0; i < stroke.length - 1; i++) {
+      const [c0, r0] = stroke[i];
+      const [c1, r1] = stroke[i + 1];
+      const steps = Math.max(Math.abs(c1 - c0), Math.abs(r1 - r0));
+      for (let s = 0; s <= steps; s++) {
+        add(
+          Math.round(c0 + ((c1 - c0) * s) / steps),
+          Math.round(r0 + ((r1 - r0) * s) / steps)
+        );
+      }
+    }
+  });
+
+  return pts;
 };
+
+const GLYPH_DOTS = Object.fromEntries(
+  Object.entries(STROKES).map(([ch, s]) => [ch, buildGlyph(s)])
+);
+
+const layoutText = (text) => {
+  const dots = [];
+  let col = 0;
+  let order = 0; // global writing order across the whole string
+
+  [...text].forEach((ch, ci) => {
+    const glyph = GLYPH_DOTS[ch];
+    if (!glyph) return;
+
+    glyph.forEach(([c, r]) => {
+      dots.push({ key: `${ci}-${c}-${r}`, x: col + c, y: r, order: order++ });
+    });
+    col += (GLYPH_WIDTH[ch] ?? 5) + CHAR_GAP;
+  });
+
+  return { dots, cols: Math.max(col - CHAR_GAP, 1), count: order };
+};
+
+const countDots = (text) => layoutText(text).count;
+
+const DotText = ({ text, sweep = false, delay = 0, intro = false, gradient = false }) => {
+  const rawId = useId();
+  const gradId = `dot-grad-${rawId.replace(/:/g, "")}`;
+  const { dots, cols } = useMemo(() => layoutText(text), [text]);
+
+  return (
+    <svg
+      viewBox={`0 0 ${cols * PITCH} ${ROWS * PITCH}`}
+      className="h-6 w-auto sm:h-8"
+      style={{ aspectRatio: `${cols} / ${ROWS}` }}
+      focusable="false"
+      aria-hidden="true"
+    >
+      {gradient && (
+        <defs>
+          <linearGradient
+            id={gradId}
+            gradientUnits="userSpaceOnUse"
+            x1="0"
+            y1="0"
+            x2={cols * PITCH}
+            y2="0"
+          >
+            <stop offset="0%" stopColor="#c084fc" />
+            <stop offset="50%" stopColor="#f472b6" />
+            <stop offset="100%" stopColor="#c084fc" />
+          </linearGradient>
+        </defs>
+      )}
+
+      {dots.map((d) => (
+        <motion.circle
+          key={d.key}
+          cx={d.x * PITCH + PITCH / 2}
+          cy={d.y * PITCH + PITCH / 2}
+          r={PITCH * 0.4}
+          fill={gradient ? `url(#${gradId})` : "#ffffff"}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{
+            duration: 0.08,
+            delay: sweep && intro ? delay + d.order * DOT_STAGGER : 0,
+          }}
+        />
+      ))}
+    </svg>
+  );
+};
+
+// Unit "flies in from behind the screen" and settles right after the number
+const UNIT_ANIMATE = {
+  scale: [0.1, 1.3, 1],
+  opacity: [0, 1, 1],
+  filter: [
+    "blur(6px) brightness(3)",
+    "blur(0px) brightness(1.8)",
+    "blur(0px) brightness(1)",
+  ],
+};
+
+const Metric = ({ value, unit, numberDelay, unitDelay, intro }) => (
+  <span
+    className="flex items-center gap-2 sm:gap-3"
+    role="img"
+    aria-label={`${value} ${unit}`}
+  >
+    <DotText text={value} sweep delay={numberDelay} intro={intro} />
+
+    <motion.span
+      className="inline-flex"
+      style={{ originX: 0.5, originY: 0.5 }}
+      initial={{ scale: 0.1, opacity: 0 }}
+      animate={UNIT_ANIMATE}
+      transition={{ delay: unitDelay, duration: 0.8, times: [0, 0.6, 1], ease: "easeOut" }}
+    >
+      <DotText text={unit} gradient />
+    </motion.span>
+  </span>
+);
+
+// true once the splash has finished (same timing as the typewriter)
+const useSplashDone = () => {
+  const [done, setDone] = useState(() => Boolean(window.__splashDone));
+
+  useEffect(() => {
+    if (done) return;
+    let id;
+    const onSplashComplete = () => {
+      id = setTimeout(() => setDone(true), 600); // wait for the splash fade-out
+    };
+    window.addEventListener("splash-complete", onSplashComplete, { once: true });
+    return () => {
+      clearTimeout(id);
+      window.removeEventListener("splash-complete", onSplashComplete);
+    };
+  }, [done]);
+
+  return done;
+};
+
+const HeroMetrics = ({ totalDistance, totalDriveMinutes }) => {
+  const splashDone = useSplashDone();
+  const loaded = totalDistance !== null && totalDriveMinutes !== null;
+  const ready = loaded && splashDone; // data is in AND the splash is gone
+  const [introDone, setIntroDone] = useState(false);
+
+  const distanceValue = loaded ? totalDistance.toFixed(2) : "";
+  const driveTimeValue = loaded ? String(totalDriveMinutes) : "";
+
+  // timeline: km number sweeps -> KM zooms in -> min number sweeps -> min zooms in
+  const T0 = 0.3;
+  const kmNumberDelay = T0;
+  const kmUnitDelay = kmNumberDelay + countDots(distanceValue || "0") * DOT_STAGGER + 0.3;
+  const minNumberDelay = kmUnitDelay + 0.8;
+  const minUnitDelay = minNumberDelay + countDots(driveTimeValue || "0") * DOT_STAGGER + 0.3;
+  const totalIntro = minUnitDelay + 1;
+
+  useEffect(() => {
+    if (!ready || introDone) return;
+    const id = setTimeout(() => setIntroDone(true), totalIntro * 1000);
+    return () => clearTimeout(id);
+  }, [ready, introDone, totalIntro]);
+
+  return (
+    <div className="whitespace-nowrap text-center text-white" aria-live="polite">
+      <p className="mb-2 font-ledger text-xs text-white sm:text-sm">
+        users on vehnicate have so far clocked:
+      </p>
+
+      {/* reserve height so the layout doesn't jump */}
+      <div className="flex min-h-[1.5rem] items-center justify-center gap-5 sm:min-h-[2rem] sm:gap-8">
+        {ready && (
+          <>
+            <Metric
+              value={distanceValue}
+              unit="KM"
+              numberDelay={kmNumberDelay}
+              unitDelay={kmUnitDelay}
+              intro={!introDone}
+            />
+
+            <motion.span
+              aria-hidden="true"
+              className="text-sm text-white"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: kmUnitDelay + 0.5, duration: 0.4 }}
+            >
+              |
+            </motion.span>
+
+            <Metric
+              value={driveTimeValue}
+              unit="min"
+              numberDelay={minNumberDelay}
+              unitDelay={minUnitDelay}
+              intro={!introDone}
+            />
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
 
 async function fetchAllRows(query) {
   const rows = [];
@@ -41,64 +270,6 @@ async function fetchAllRows(query) {
   }
 }
 
-const SevenSegmentNumber = ({ value }) => (
-  <span className="inline-flex items-center gap-px" aria-hidden="true">
-    {String(value).split("").map((character, index) => {
-      if (character === ".") {
-        return (
-          <span
-            key={`${character}-${index}`}
-            className="mx-0.5 mb-1 h-1 w-1 self-end rounded-full bg-white"
-          />
-        );
-      }
-
-      return (
-        <svg
-          key={`${character}-${index}`}
-          viewBox="0 0 28 50"
-          className="h-7 w-4 sm:h-8 sm:w-[18px]"
-          focusable="false"
-        >
-          {Object.entries(SEGMENT_PATHS)
-            .filter(([segment]) => DIGIT_SEGMENTS[character]?.includes(segment))
-            .map(([segment, path]) => (
-              <path
-                key={segment}
-                d={path}
-                fill="#ffffff"
-                style={{ filter: "drop-shadow(0 0 3px rgba(255,255,255,0.55))" }}
-              />
-            ))}
-        </svg>
-      );
-    })}
-  </span>
-);
-
-const HeroMetrics = ({ totalDistance, totalDriveMinutes }) => {
-  const distanceValue = totalDistance === null ? "--.--" : totalDistance.toFixed(2);
-  const driveTimeValue = totalDriveMinutes === null ? "---" : String(totalDriveMinutes);
-
-  return (
-    <div className="whitespace-nowrap text-center text-white" aria-live="polite">
-      <p className="mb-1 font-ledger text-xs text-white sm:text-sm">
-        users on vehnicate have so far clocked:
-      </p>
-              <div className="flex items-center justify-center gap-5 sm:gap-8">
-        <span className="flex items-center gap-1.5" role="img" aria-label={`${distanceValue} km`}>
-          <SevenSegmentNumber value={distanceValue} />
-          <span className="bg-gradient-to-r from-purple-300 via-pink-400 to-purple-300 bg-clip-text font-sans text-base font-bold text-transparent sm:text-lg">km</span>
-        </span>
-        <span aria-hidden="true" className="text-sm text-white">|</span>
-        <span className="flex items-center gap-1.5" role="img" aria-label={`${driveTimeValue} min`}>
-          <SevenSegmentNumber value={driveTimeValue} />
-          <span className="bg-gradient-to-r from-purple-300 via-pink-400 to-purple-300 bg-clip-text font-sans text-base font-bold text-transparent sm:text-lg">min</span>
-        </span>
-      </div>
-    </div>
-  );
-};
 
 // ============================================================
 // DESCRIPTION SEGMENTS
