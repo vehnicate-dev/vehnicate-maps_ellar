@@ -68,18 +68,15 @@ def _find_nearby_key(
         return key
     return None
 
-
 def _compute_confidence(existing: dict, N: int, target_keys: set[str]) -> dict[str, float]:
-    # Unchanged from the previous implementation — the design doc treats
-    # "confidence" as a given input (used only in the confirmed-or-confidence
-    # >= 30 legitimacy test) and doesn't specify how it's computed, so this
-    # is left untouched.
     if not target_keys:
         return {}
     if N == 0:
         return {key: 0.0 for key in target_keys}
     if N == 1:
-        return {key: 100.0 for key in target_keys}
+        # A single trip means every defect has been flagged exactly once,
+        # so none has been confirmed yet.
+        return {key: 0.0 for key in target_keys}
 
     rd_trip_sets: list[tuple[str, set]] = [
         (key, set(row["rd_trip_ids"] or []))
@@ -89,6 +86,11 @@ def _compute_confidence(existing: dict, N: int, target_keys: set[str]) -> dict[s
     result: dict[str, float] = {}
     for ego_key, ego_trips in rd_trip_sets:
         if ego_key not in target_keys:
+            continue
+
+        # Flagged only once -> not confirmed yet -> confidence stays 0%.
+        if len(ego_trips) <= 1:
+            result[ego_key] = 0.0
             continue
 
         union_others: set = set()
