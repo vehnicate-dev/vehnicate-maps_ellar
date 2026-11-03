@@ -587,33 +587,60 @@ def _ensure_test_target_vehicle(
     supabase_target,
     vehicle_id: int,
     user_id: str,
-) -> None:
+) -> int:
     target_vehicle = _execute_with_retry(
         supabase_target.table("vehicle_details")
-        .select("vehicle_id")
-        .eq("vehicle_id", vehicle_id)
+        .select("vehicleid")
+        .eq("vehicleid", vehicle_id)
         .limit(1)
     )
     if target_vehicle.data:
-        return
+        return int(target_vehicle.data[0]["vehicleid"])
 
     source_vehicle = _execute_with_retry(
         supabase_source.table("vehicle_details")
         .select("*")
-        .eq("vehicle_id", vehicle_id)
+        .eq("vehicleid", vehicle_id)
         .limit(1)
     )
     if not source_vehicle.data:
         raise ValueError(f"Source vehicle_details row for {vehicle_id} was not found.")
 
-    vehicle_data = dict(source_vehicle.data[0])
-    for owner_column in ("user_id", "firebaseuid"):
-        if owner_column in vehicle_data:
-            vehicle_data[owner_column] = user_id
+    source_vehicle_data = source_vehicle.data[0]
+    registration = source_vehicle_data.get("registration")
+    if registration:
+        matching_vehicle = _execute_with_retry(
+            supabase_target.table("vehicle_details")
+            .select("vehicleid")
+            .eq("firebaseuid", user_id)
+            .eq("registration", registration)
+            .limit(1)
+        )
+        if matching_vehicle.data:
+            return int(matching_vehicle.data[0]["vehicleid"])
 
-    _execute_with_retry(
-        supabase_target.table("vehicle_details").insert(vehicle_data)
+    vehicle_data = {
+        column: source_vehicle_data[column]
+        for column in (
+            "firebaseuid",
+            "insurance",
+            "registration",
+            "puc",
+            "model",
+            "vehicle_type",
+            "average_mileage",
+        )
+        if column in source_vehicle_data
+    }
+    vehicle_data["firebaseuid"] = user_id
+    inserted_vehicle = _execute_with_retry(
+        supabase_target.table("vehicle_details")
+        .insert(vehicle_data)
+        .select("vehicleid")
     )
+    if not inserted_vehicle.data:
+        raise RuntimeError(f"Target insert did not return vehicleid for source vehicle {vehicle_id}.")
+    return int(inserted_vehicle.data[0]["vehicleid"])
 
 
 def _ensure_test_target_session(supabase_source, supabase_target, session_id: str) -> None:
@@ -639,11 +666,18 @@ def _ensure_test_target_session(supabase_source, supabase_target, session_id: st
         raise ValueError(f"Source session {session_id} was not found for target event insertion.")
 
     user_id = source_session.data[0]["user_id"]
-    vehicle_id = source_session.data[0]["vehicle_id"]
+    source_vehicle_id = source_session.data[0]["vehicle_id"]
     _ensure_test_target_user(supabase_source, supabase_target, user_id)
-    _ensure_test_target_vehicle(supabase_source, supabase_target, vehicle_id, user_id)
+    target_vehicle_id = _ensure_test_target_vehicle(
+        supabase_source,
+        supabase_target,
+        source_vehicle_id,
+        user_id,
+    )
+    target_session_data = dict(source_session.data[0])
+    target_session_data["vehicle_id"] = target_vehicle_id
     _execute_with_retry(
-        supabase_target.table("sessions").insert(source_session.data[0])
+        supabase_target.table("sessions").insert(target_session_data)
     )
 
 
