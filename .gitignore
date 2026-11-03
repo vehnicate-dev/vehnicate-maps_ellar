@@ -6,3 +6,10 @@ node_modules/
 !/road-defect-auditor/app/
 !/road-defect-auditor/app/src/
 !/road-defect-auditor/app/src/**
+vehnicate-release.jks
+# Android release signing keys
+*.jks
+*.keystore
+
+# Signing credentials
+keystore.properties

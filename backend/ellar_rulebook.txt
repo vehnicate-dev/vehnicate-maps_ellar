@@ -1,64 +1,194 @@
-for h in hexagons_covered_during_trip:
+##############################################################################
+# HEXAGONS TABLE - what each column means
+# one row = one unique road defect (rD)
+##############################################################################
+
+# ---- identity / location of the rD ----
+# id                  : unique id of the rD row (this is what identifies one specific rD, the ledger gets it too)
+# h3_index            : the H3 (res 9) hexagon the rD was discovered in. the "owner" hexagon of the rD
+# lat, lon            : current location of the rD = running (weighted) average of every coordinate recorded for it
+# nd_count            : how many coordinates have been averaged into lat/lon (starts at 1, +1 for every recording,
+#                       including repeat flags from round trips)
+# direction_label     : "forward"/"backward" along the osm way, taken from the discovering detection
+# osm_way_id          : osm way the rD was discovered on, taken from the discovering detection
+#                       (either can be null if that gps fix couldnt be map matched)
+
+# ---- history of who/when flagged the rD (these arrays line up with each other: one entry per recording) ----
+# rd_trip_ids         : session id of every recording. [0] is the discovering session. the same session can show up
+#                       again if it was a round trip (>60s later)
+# flag_ts_ms          : timestamp (ms) of every recording, same order as rd_trip_ids. used for the 60s same-visit check
+# event_id            : imu_events id of every recording, same order. used to avoid processing an event twice
+# nd                  : user ids. [0] is the discoverer, then one entry per recording from a DIFFERENT session than
+#                       the previous recordings of that session (so a user can appear many times across sessions,
+#                       but a repeat flag from the same session is NOT added). for rewards we only look at the
+#                       unique users in nd[1:]
+# jerk_values         : jerk (m/s^3) of every confirming recording (the discovery's own jerk isnt stored here)
+# last_confirmed_at   : start_time of the latest recording that counted as a confirmation
+
+# ---- status of the rD ----
+# confirmed           : True once the rD has been flagged again after discovery. by anyone - another user, the
+#                       discoverer in another session, or (SELF_CONFIRM_ON_REPEAT=True) the same session on a round trip
+# legit               : True once a DIFFERENT user (not the discoverer) has confirmed it AND the discoverer's
+#                       escrow has been released. only a stranger can set this
+# pass_count          : number of times vehicles passed this rD since it was discovered (the discovering trip's own
+#                       pass included). a "pass" = a visit, see record_trip_passes below
+# confidence          : (number of entries in rd_trip_ids / pass_count) * 100, capped to 0-100.
+#                       0 while the rD has been recorded only once
+
+# ---- discovery reward bookkeeping (saved at discovery so unfreeze/penalty use exactly what was frozen) ----
+# discovery_n         : the N of the discovering trip in the owner hexagon (see N below)
+# discovery_reward    : the frozen ellar the discoverer got for this rD
+
+# ---- hexagon-level columns (the SAME value is stored on every rD row of a hexagon) ----
+# trip_id             : sessions that produced at least one event in this hexagon, in order
+#                       (previously stored trips first, then new ones by earliest event time).
+#                       index+1 in this list = N
+# user_id             : user of each trip, same order as trip_id (a user can repeat)
+# k                   : number of events each trip produced in this hexagon, same order as trip_id
+# ellar_user          : discovery reward each trip earned in this hexagon, same order as trip_id
+#                       (only ever added to at discovery, not reduced by unfreeze/penalty)
+# frozen_ellar_hex    : ellar currently frozen (discovery rewards not yet unfrozen) in this hexagon
+# liquid_ellar_hex    : ellar that has become liquid in this hexagon (confirmation rewards + unfrozen rewards)
+
+
+##############################################################################
+# PART 1 - update_hexagons (runs after Aliv, only if the trip had events)
+##############################################################################
+
+# events are sorted by start_time and grouped by the hexagon of their first matched point.
+# each hexagon is then processed on its own, one after the other
+for h in hexagons_of_the_trips_events:
     if imu_only==false:
         multiplier = 1.0
     else:
         multiplier = 0.5
-    for i in detections:
-        if i is unique: #i.e., the detection isnt within 15m of any other detection acc to gps
-            N = number of users that have travelled in this hexagon previously + 1
-            if N<=100:
-                discovery_reward = multiplier * (4 - 2·log10(N))
-            else:
-                ellar_hex = ellar_hex column value from the hexagons table for this hexagon
-                rD = number of unique roaddefects in that hexagon
-                discovery_reward = multiplier * (ell_hex)/rD
-            user_frozen_ellar_balance+=discovery_reward
-        else: # i.e, this detection is a confirmation of an existing roaddefect... thereby we give confirmation reward to the user if eligible
-            if ego_user is eligible(i):
-                """
-                the user is eligible for the confirmation reward of the roaddefect "i" iff:
-                    - they arent the roaddefect's discoverer
-                    - they havent received the confirmation reward for this i roaddefect previously
-                """
-                # the nd column in the hexagons table may contain one user multiple times -
-                # each entry indicating each time the user encountered the defect...
-                # but for the reward computation, we only consider unique users.
-                nD = number of unique users that have flagged this roaddefect previously + 1
-                confirmation_reward = multiplier * (2 - 1 * log10(nD))
-                user_liquid_ellar_balance+=confirmation_reward
-                if not i.legit:
-                    # checks the "hexagons" table (rd_trip_ids column) for the session that had flagged the roaddefect "i" for the first time:
-                    sessionid_discoverer = discoverer(i)
 
-                    # use that sessionid to find out the "N" of the user in that hexagon in the "trip_id" column of the hexagons table
-                    N_of_discoverer = index(trip_id[sessionid_discoverer]) + 1
+    # load every rD row of h AND of its 6 neighbouring hexagons, so a detection near a hexagon
+    # boundary can still match an rD that sits in the next hexagon
+    # trip_id/user_id/k/ellar_user/frozen_ellar_hex/liquid_ellar_hex are taken from the rows of h itself
 
-                    # unfreeze the frozen_ellar for the discoverer as soon as the roaddefect is confirmed by another user
-                    # NOTE: For the multiplier being used during unfreezing, refer the sessions table using the sessionid_discoverer
-                    discoverer_frozen_ellar_balance-=(4-2*log10(N_of_discoverer)) * multiplier
-                    discoverer_liquid_ellar_balance+=(4-2*log10(N_of_discoverer)) * multiplier
+    for event in the events of this trip in h:
+        if event was already processed (its id is in some rD's event_id column): skip
 
-                    i.legit = True # the legit column corresponding to the roaddefect is set to True because someone else independently verified the presence of the roaddefect
-                i.confirmed = True # may be the discoverer drove over the roaddefect... this counts as a confirmation but the discoverer isnt eligible to receive the confirmation reward.
+        # N = position of this trip in the trip_id list of h, i.e. "this is the Nth TRIP that produced an event
+        # in this hexagon" (it is trips, not users, and trips with no detections arent in the list)
 
-    if (N-10+1)th trip exists:
-        # i.e., this trip is the 10th trip after a certain trip, x.
-        # so its time to check the legitimacy of the roaddefects disovered during the xth trip
-        sessionid_xth_trip = N-10+1 # from the trip_ids column of hexagons table
-        for i in roaddefects:
-            if rd_trip_ids[i][0]==sessionid_xth_trip: # the roaddefects that were discovered during the xth session
+        for coord in event.path:     # the matched coordinates of the event
+            i = existing rD within 20m of coord
+                # same osm_way_id and same direction_label required, but only when both sides are known.
+                # (if either is missing, it falls back to distance only)
+
+            if no such rD: # i is unique
+                if N<=99:
+                    discovery_reward = multiplier * (4 - 2·log10(N))
+                else:
+                    rD = number of unique roaddefects currently in h (counting the ones inserted so far in this run)
+                    discovery_reward = multiplier * (frozen_ellar_hex)/rD   # 0 if rD==0
+                insert new rD row:
+                    nd=[user], rd_trip_ids=[session], flag_ts_ms=[event time], event_id=[event id],
+                    nd_count=1, confirmed=False, legit=False, pass_count=0, confidence=0,
+                    discovery_n=N, discovery_reward=discovery_reward,
+                    osm_way_id / direction_label = those of the event
+                user_frozen_ellar_balance+=discovery_reward
+                frozen_ellar_hex+=discovery_reward
+                ellar_user[this trip]+=discovery_reward
+
+            else: # i.e, this detection is another recording of an existing roaddefect
+                if this session is already in i.rd_trip_ids:
+                    # round trip: the same session driving over the same roaddefect again
+                    if time since this session's last recording of i <= 60 seconds: skip   # same visit
+                    repeat = True
+                else:
+                    repeat = False
+
+                move i.lat/i.lon to the new running average, nd_count+=1
+                i.rd_trip_ids += session, i.flag_ts_ms += event time, i.event_id += event id
+                if not repeat: i.nd += user      # repeats dont touch nd, so they cant shrink later users' nD
+                if event.jerk is a finite number: i.jerk_values += jerk
+
+                if ego_user is eligible(i):
+                    """
+                    the user is eligible for the confirmation reward of the roaddefect "i" iff:
+                        - this is not a repeat from the same session
+                        - they arent the roaddefect's discoverer (i.nd[0])
+                        - they arent already in i.nd[1:] (they havent confirmed it before)
+                    """
+                    nD = number of unique users in i.nd[1:] (before adding this user) + 1
+                    confirmation_reward = multiplier * (2 - 1 * log10(nD))
+                    user_liquid_ellar_balance+=confirmation_reward
+                    liquid_ellar_hex+=confirmation_reward
+
+                    if not i.legit:
+                        unfreeze_amt = i.discovery_reward
+                        # (old rows that dont have discovery_reward: recompute it as
+                        #  discoverer_multiplier * (4-2·log10(N_of_discoverer)), where N_of_discoverer is the
+                        #  index of the discovering session in the trip_id list of h and discoverer_multiplier
+                        #  comes from the sessions table. if the session isnt in that list, unfreeze_amt is unknown)
+
+                        if unfreeze_amt is known:
+                            # the discoverer's own multiplier is already inside discovery_reward
+                            discoverer_frozen_ellar_balance-=unfreeze_amt
+                            discoverer_liquid_ellar_balance+=unfreeze_amt
+                            if i belongs to h (and not a neighbouring hexagon):
+                                frozen_ellar_hex-=unfreeze_amt
+                                liquid_ellar_hex+=unfreeze_amt
+                            i.legit = True # someone else independently verified the roaddefect
+                        else:
+                            # nothing is unfrozen and legit stays False, so the next stranger's confirmation retries it
+                            log a warning
+
+                if not repeat or SELF_CONFIRM_ON_REPEAT:
+                    i.confirmed = True
+                    i.last_confirmed_at = event time
+                    # may be the discoverer drove over the roaddefect (same session on a round trip, or another
+                    # session). this counts as a confirmation but they arent eligible for the confirmation reward
+
+    # check the legitimacy of an older trip's roaddefects (only if h has more than 10 trips)
+    if h has more than 10 trips:
+        # the trip 10 positions before the latest trip in the trip_id list, call it x
+        sessionid_xth_trip = trip_id[len(trip_id) - 11]    # 0-based index
+        discoverer = user_id[len(trip_id) - 11]
+        for i in roaddefects of h:                         # only the rD rows that belong to h
+            if i.rd_trip_ids[0]==sessionid_xth_trip:       # discovered during the xth session
                 if !(i.confirmed==True or i.confidence>=30):
-                    discoverer_of_illegit_roaddefect = i.user_id[0]
-
-                    # since for a non-confirmed roaddefect, the discoverer will be the one and only user in the rd_trip_ids column of the roaddefect
-                    sessionid_discoverer = rd_trips_id[i][0]
-    
-                    # use that sessionid to find out the "N" of the user in that hexagon in the "trip_id" column of the hexagons table
-                    N_of_discoverer = index(trip_id[sessionid_discoverer]) + 1
-                    # NOTE: For the multiplier being used during unfreezing, refer the sessions table using the sessionid_discoverer
-                    frozen_ellar_balance[discoverer_of_illegit_roaddefect]-= 1.00 * multiplier * (4-2*log10(N_of_discoverer))
-                    liquid_ellar_balance[discoverer_of_illegit_roaddefect]-= 0.01 * multiplier * (4-2*log10(N_of_discoverer))
+                    # NOTE: i.confidence is the value stored after the PREVIOUS trip, because the passes of the
+                    # current trip are counted after all of this (see part 2)
+                    penalty = i.discovery_reward
+                    # (old rows without discovery_reward: discoverer_multiplier * (4-2·log10(N)) using the sessions
+                    #  table multiplier and N = index of the xth trip + 1)
+                    frozen_ellar_balance[discoverer]-= penalty
+                    # no liquid penalty, only the frozen amount is taken back
+                    frozen_ellar_hex-= penalty
                     i.remove() # remove the roaddefect row from the hexagons table.
 
-                
+    # then, for h:
+    # apply the accumulated balance changes (one update per user for frozen, one for liquid)
+    # write trip_id, user_id, k, ellar_user, frozen_ellar_hex, liquid_ellar_hex to every remaining rD row of h
+    # (confidence and pass_count are NOT written here)
 
+after all hexagons: call refresh_hexagon_parameters
+
+
+##############################################################################
+# PART 2 - record_trip_passes
+# runs once per trip, AFTER part 1, for EVERY map-matched trip - including trips with zero detections,
+# otherwise trips that drove over a roaddefect without flagging it wouldnt count as a pass
+# (not run for trips skipped earlier: <10 gps points, <50m moved, or sessions already aliv_processed)
+##############################################################################
+
+fixes = the trip's map matched gps fixes (matched_lat, matched_lon, osm_way_id, direction_label, timestamp_ms)
+load every rD row in the hexagons of those fixes and their neighbours
+
+for i in those roaddefects:
+    hits = fixes within 20m of i, with the same osm_way_id and direction_label (when both are known)
+    # a "visit" = a cluster of hits. two hits more than 60 seconds apart = 2 visits
+    # (so a round trip counts twice, and a different session counts separately anyway)
+    visits = 0 if no hits, else 1 + number of gaps >60s between consecutive hits
+    i.pass_count += visits
+    recordings = number of entries in i.rd_trip_ids      # includes repeat flags from round trips
+    if recordings <= 1 or i.pass_count <= 0:
+        i.confidence = 0     # flagged only once, so not confirmed yet - confidence stays 0%
+    else:
+        i.confidence = recordings / i.pass_count * 100   # capped between 0 and 100
+    # the row is only written if pass_count or confidence changed
+    # only rDs near this trip's trace get recomputed, an rD nobody drove past keeps its old values

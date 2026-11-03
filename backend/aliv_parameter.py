@@ -1,8 +1,45 @@
 import math
 from collections.abc import Sequence
+from statistics import median
 
 
 GRAVITY_M_S2 = 9.8
+
+
+def median_speed_for_interval(
+    timestamp_ms: Sequence[float],
+    speed_mps: Sequence[float | None],
+    start_ms: float,
+    end_ms: float,
+) -> float | None:
+    """Return the interval median, falling back to the nearest positive fix."""
+    if not math.isfinite(start_ms) or not math.isfinite(end_ms):
+        return None
+
+    start_ms, end_ms = sorted((start_ms, end_ms))
+    valid_fixes: list[tuple[float, float]] = []
+    for raw_timestamp, raw_speed in zip(timestamp_ms, speed_mps):
+        try:
+            timestamp = float(raw_timestamp)
+            speed = float(raw_speed)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(timestamp) and math.isfinite(speed) and speed > 0.0:
+            valid_fixes.append((timestamp, speed))
+
+    if not valid_fixes:
+        return None
+
+    interval_speeds = [
+        speed
+        for timestamp, speed in valid_fixes
+        if start_ms <= timestamp <= end_ms
+    ]
+    if interval_speeds:
+        return float(median(interval_speeds))
+
+    midpoint_ms = (start_ms + end_ms) / 2.0
+    return min(valid_fixes, key=lambda fix: abs(fix[0] - midpoint_ms))[1]
 
 
 def transform_accel_z_to_vehicle_frame(

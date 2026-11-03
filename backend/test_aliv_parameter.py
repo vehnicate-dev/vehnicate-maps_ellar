@@ -1,7 +1,10 @@
 import math
 import unittest
 
-from aliv_parameter import transform_accel_z_to_vehicle_frame
+from aliv_parameter import (
+    median_speed_for_interval,
+    transform_accel_z_to_vehicle_frame,
+)
 
 
 class TransformAccelZTests(unittest.TestCase):
@@ -30,6 +33,40 @@ class TransformAccelZTests(unittest.TestCase):
         self.assertEqual(
             [],
             transform_accel_z_to_vehicle_frame([], [], [], [], [], []),
+        )
+
+
+class MedianSpeedForIntervalTests(unittest.TestCase):
+    def test_returns_median_of_positive_speeds_inside_closed_interval(self):
+        self.assertEqual(
+            4.0,
+            median_speed_for_interval(
+                [900, 1000, 1100, 1200, 1300],
+                [100.0, 2.0, 0.0, 6.0, 100.0],
+                1000,
+                1200,
+            ),
+        )
+
+    def test_uses_nearest_positive_speed_when_interval_has_no_positive_fix(self):
+        self.assertEqual(
+            8.0,
+            median_speed_for_interval(
+                [0, 90, 110],
+                [5.0, 8.0, 12.0],
+                100,
+                100,
+            ),
+        )
+
+    def test_returns_none_when_no_positive_speed_fix_exists(self):
+        self.assertIsNone(
+            median_speed_for_interval(
+                [0, 100, 200],
+                [0.0, None, -1.0],
+                50,
+                150,
+            )
         )
 
 

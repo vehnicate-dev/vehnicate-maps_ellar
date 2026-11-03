@@ -1,8 +1,16 @@
+import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("keystore.properties")
 
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.inputStream().use {
+        keystoreProperties.load(it)
+    }
+}
 val h3Version = "4.5.0"
 val h3AndroidNativeArtifacts by configurations.creating {
     isCanBeConsumed = false
@@ -45,7 +53,22 @@ android {
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"$supabaseKey\"")
     }
+    signingConfigs {
+        create("release") {
+            storeFile = rootProject.file(
+                keystoreProperties["storeFile"] as String
+            )
+            storePassword = keystoreProperties["storePassword"] as String
+            keyAlias = keystoreProperties["keyAlias"] as String
+            keyPassword = keystoreProperties["keyPassword"] as String
+        }
+    }
 
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
     buildFeatures {
         buildConfig = true
     }
@@ -57,6 +80,13 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+
+    applicationVariants.all {
+        outputs.all {
+            (this as com.android.build.gradle.internal.api.BaseVariantOutputImpl)
+                .outputFileName = "vehnicate_roadDefect_alert.apk"
+        }
     }
 }
 

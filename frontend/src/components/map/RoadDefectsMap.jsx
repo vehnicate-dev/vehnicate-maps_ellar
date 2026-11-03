@@ -40,7 +40,7 @@ const METRO_AREAS = [
     aliases: [
       "chennai", "tambaram", "avadi", "ambattur", "poonamallee", "pallavaram", "chromepet",
       "thiruvottiyur", "tiruvottiyur", "madhavaram", "sholinganallur", "medavakkam",
-      "perungudi", "kundrathur", "sriperumbudur", "maraimalai nagar",
+      "perungudi", "kundrathur", "sriperumbudur", "maraimalai nagar", "chennai metropolitan area",
     ],
   },
 ];

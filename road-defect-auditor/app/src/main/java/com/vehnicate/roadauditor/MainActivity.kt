@@ -26,6 +26,7 @@ import androidx.core.view.setPadding
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import org.json.JSONObject
+import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
     private lateinit var stateText: TextView
@@ -35,41 +36,82 @@ class MainActivity : Activity() {
     private lateinit var idleScreen: LinearLayout
     private lateinit var driveHeader: LinearLayout
     private lateinit var stopDriveButton: Button
+    private lateinit var defectAlertBadge: TextView
+
     private var driveActive = false
     private var mapPageReady = false
     private var pendingMapData: String? = null
+    private var nearestDefectDistance = -1
+    private var nearestDefectParameter = 0.0
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != DriveMonitorService.ACTION_STATUS) return
-            stateText.text = intent.getStringExtra(DriveMonitorService.EXTRA_STATE)
-                ?: getString(R.string.drive_active)
-            driveActive = intent.getBooleanExtra(DriveMonitorService.EXTRA_RUNNING, driveActive)
+
+            stateText.text = intent.getStringExtra(
+                DriveMonitorService.EXTRA_STATE,
+            ) ?: getString(R.string.drive_active)
+
+            driveActive = intent.getBooleanExtra(
+                DriveMonitorService.EXTRA_RUNNING,
+                driveActive,
+            )
+
+            // Read the latest defect information before updating the UI.
+            nearestDefectDistance = intent.getIntExtra(
+                DriveMonitorService.EXTRA_NEAREST_DEFECT_DISTANCE,
+                -1,
+            )
+
+            nearestDefectParameter = intent.getDoubleExtra(
+                DriveMonitorService.EXTRA_NEAREST_DEFECT_PARAMETER,
+                0.0,
+            )
+
             saveDriveState()
             updateButton()
-            val speed = intent.getDoubleExtra(DriveMonitorService.EXTRA_SPEED_KMH, 0.0)
-            val cell = intent.getStringExtra(DriveMonitorService.EXTRA_CELL).orEmpty()
-            val count = intent.getIntExtra(DriveMonitorService.EXTRA_DEFECT_COUNT, 0)
+
+            val speed = intent.getDoubleExtra(
+                DriveMonitorService.EXTRA_SPEED_KMH,
+                0.0,
+            )
+            val cell = intent.getStringExtra(
+                DriveMonitorService.EXTRA_CELL,
+            ).orEmpty()
+            val count = intent.getIntExtra(
+                DriveMonitorService.EXTRA_DEFECT_COUNT,
+                0,
+            )
+
             detailsText.text = when {
                 !driveActive -> getString(R.string.gps_monitoring_off)
                 cell.isBlank() -> getString(R.string.waiting_for_gps)
                 else -> getString(R.string.drive_details, speed, count, cell)
             }
-            updateDriveMap(intent.getStringExtra(DriveMonitorService.EXTRA_MAP_DATA))
+
+            updateDriveMap(
+                intent.getStringExtra(DriveMonitorService.EXTRA_MAP_DATA),
+            )
+
+            renderDefectBadge()
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         driveActive = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
             .getBoolean(DRIVE_ACTIVE, false)
+
         buildScreen()
         updateButton()
     }
 
     override fun onStart() {
         super.onStart()
+
         val filter = IntentFilter(DriveMonitorService.ACTION_STATUS)
+
         ContextCompat.registerReceiver(
             this,
             statusReceiver,
@@ -97,15 +139,27 @@ class MainActivity : Activity() {
         mapView = WebView(this).apply {
             setBackgroundColor(0xFFF4F1E8.toInt())
             settings.javaScriptEnabled = true
+
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     mapPageReady = true
                     pendingMapData?.let(::renderDriveMap)
                 }
             }
-            val mapHtml = assets.open("drive_map.html").bufferedReader().use { it.readText() }
-            loadDataWithBaseURL("https://vehnicate.com/", mapHtml, "text/html", "UTF-8", null)
+
+            val mapHtml = assets.open("drive_map.html")
+                .bufferedReader()
+                .use { it.readText() }
+
+            loadDataWithBaseURL(
+                "https://vehnicate.com/",
+                mapHtml,
+                "text/html",
+                "UTF-8",
+                null,
+            )
         }
+
         root.addView(mapView, FrameLayout.LayoutParams(-1, -1))
 
         idleScreen = LinearLayout(this).apply {
@@ -120,32 +174,48 @@ class MainActivity : Activity() {
             contentDescription = getString(R.string.brand_logo_description)
             scaleType = ImageView.ScaleType.FIT_CENTER
         }
-        idleScreen.addView(logo, LinearLayout.LayoutParams(dp(104), dp(104)).apply {
-            bottomMargin = dp(18)
-        })
+
+        idleScreen.addView(
+            logo,
+            LinearLayout.LayoutParams(dp(104), dp(104)).apply {
+                bottomMargin = dp(18)
+            },
+        )
 
         val title = TextView(this).apply {
             text = "vehnicate"
             textSize = 30f
             letterSpacing = 0.04f
-            typeface = Typeface.createFromAsset(assets, "fonts/Ledger-Regular.ttf")
+            typeface = Typeface.createFromAsset(
+                assets,
+                "fonts/Ledger-Regular.ttf",
+            )
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
         }
+
         idleScreen.addView(title, matchWrap())
 
         stateText = TextView(this).apply {
             text = getString(
-                if (driveActive) R.string.drive_active else R.string.ready_when_you_are,
+                if (driveActive) {
+                    R.string.drive_active
+                } else {
+                    R.string.ready_when_you_are
+                },
             )
             textSize = 12f
             letterSpacing = 0.12f
             setTextColor(Color.LTGRAY)
             gravity = Gravity.CENTER
         }
-        idleScreen.addView(stateText, LinearLayout.LayoutParams(-1, -2).apply {
-            topMargin = dp(42)
-        })
+
+        idleScreen.addView(
+            stateText,
+            LinearLayout.LayoutParams(-1, -2).apply {
+                topMargin = dp(42)
+            },
+        )
 
         detailsText = TextView(this).apply {
             text = getString(R.string.initial_details)
@@ -154,10 +224,14 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             setLineSpacing(dp(5).toFloat(), 1f)
         }
-        idleScreen.addView(detailsText, LinearLayout.LayoutParams(-1, -2).apply {
-            topMargin = dp(12)
-            bottomMargin = dp(32)
-        })
+
+        idleScreen.addView(
+            detailsText,
+            LinearLayout.LayoutParams(-1, -2).apply {
+                topMargin = dp(12)
+                bottomMargin = dp(32)
+            },
+        )
 
         driveButton = Button(this).apply {
             text = getString(R.string.start_drive)
@@ -168,8 +242,16 @@ class MainActivity : Activity() {
             setPadding(dp(28), dp(14), dp(28), dp(14))
             setOnClickListener { onDriveButtonPressed() }
         }
-        idleScreen.addView(driveButton, LinearLayout.LayoutParams(-1, dp(58)))
-        root.addView(idleScreen, FrameLayout.LayoutParams(-1, -1))
+
+        idleScreen.addView(
+            driveButton,
+            LinearLayout.LayoutParams(-1, dp(58)),
+        )
+
+        root.addView(
+            idleScreen,
+            FrameLayout.LayoutParams(-1, -1),
+        )
 
         driveHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -178,27 +260,63 @@ class MainActivity : Activity() {
             setBackgroundColor(0xF20C0C12.toInt())
             elevation = dp(8).toFloat()
         }
+
         val driveLogo = ImageView(this).apply {
             setImageResource(R.drawable.in_app_logo)
             contentDescription = getString(R.string.brand_logo_description)
             scaleType = ImageView.ScaleType.FIT_CENTER
         }
-        driveHeader.addView(driveLogo, LinearLayout.LayoutParams(dp(40), dp(40)).apply {
-            marginEnd = dp(10)
-        })
+
+        driveHeader.addView(
+            driveLogo,
+            LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+                marginEnd = dp(10)
+            },
+        )
+
         val driveTitle = TextView(this).apply {
             text = "vehnicate"
             textSize = 20f
             letterSpacing = 0.04f
-            typeface = Typeface.createFromAsset(assets, "fonts/Ledger-Regular.ttf")
+            typeface = Typeface.createFromAsset(
+                assets,
+                "fonts/Ledger-Regular.ttf",
+            )
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER_VERTICAL
         }
+
         driveHeader.addView(driveTitle, matchWrap())
+
         root.addView(
             driveHeader,
-            FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
+            FrameLayout.LayoutParams(
+                -2,
+                -2,
+                Gravity.TOP or Gravity.CENTER_HORIZONTAL,
+            ).apply {
                 topMargin = dp(16)
+            },
+        )
+
+        defectAlertBadge = TextView(this).apply {
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            elevation = dp(8).toFloat()
+            visibility = View.GONE
+        }
+
+        root.addView(
+            defectAlertBadge,
+            FrameLayout.LayoutParams(
+                -2,
+                -2,
+                Gravity.TOP or Gravity.CENTER_HORIZONTAL,
+            ).apply {
+                // Positioned directly below the Vehnicate header.
+                topMargin = dp(78)
             },
         )
 
@@ -212,37 +330,118 @@ class MainActivity : Activity() {
             elevation = dp(8).toFloat()
             setOnClickListener { onDriveButtonPressed() }
         }
+
         root.addView(
             stopDriveButton,
-            FrameLayout.LayoutParams(-2, dp(56), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            FrameLayout.LayoutParams(
+                -2,
+                dp(56),
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
+            ).apply {
                 bottomMargin = dp(28)
             },
         )
+
         setContentView(root)
         updateButton()
+    }
+
+    private fun renderDefectBadge() {
+        if (!::defectAlertBadge.isInitialized) return
+
+        if (!driveActive || nearestDefectDistance < 0) {
+            defectAlertBadge.visibility = View.GONE
+            return
+        }
+
+        val color = getEventColor(nearestDefectParameter)
+
+        defectAlertBadge.text =
+            "Road defect in $nearestDefectDistance meters"
+
+        // The entire rectangular badge matches the marker colour.
+        defectAlertBadge.setBackgroundColor(color)
+
+        val red = Color.red(color)
+        val green = Color.green(color)
+        val blue = Color.blue(color)
+
+        val luminance =
+            (red * 299 + green * 587 + blue * 114) / 1000
+
+        defectAlertBadge.setTextColor(
+            if (luminance >= 150) Color.BLACK else Color.WHITE,
+        )
+
+        defectAlertBadge.visibility = View.VISIBLE
+    }
+
+    private fun getEventColor(parameter: Double): Int {
+        val value = if (parameter.isFinite()) {
+            parameter.coerceIn(0.0, 1.0)
+        } else {
+            0.0
+        }
+
+        return when {
+            value < 0.3 -> {
+                val x = Math.pow(value / 0.3, 2.0)
+                Color.rgb(
+                    0,
+                    (120 + 135 * x).roundToInt(),
+                    0,
+                )
+            }
+
+            value < 0.5 -> {
+                val x = Math.pow((value - 0.3) / 0.2, 2.0)
+                Color.rgb(
+                    255,
+                    (140 - 90 * x).roundToInt(),
+                    0,
+                )
+            }
+
+            else -> {
+                val x = Math.pow((value - 0.5) / 0.5, 2.0)
+                Color.rgb(
+                    255,
+                    (50 * (1 - x)).roundToInt(),
+                    0,
+                )
+            }
+        }
     }
 
     private fun onDriveButtonPressed() {
         if (driveActive) {
             stopMonitorService()
             driveActive = false
+            nearestDefectDistance = -1
             saveDriveState()
             stateText.text = getString(R.string.drive_stopped)
             detailsText.text = getString(R.string.gps_monitoring_off)
             updateButton()
             return
         }
+
         if (!hasLocationPermission()) {
             val permissions = mutableListOf(
                 Manifest.permission.ACCESS_FINE_LOCATION,
                 Manifest.permission.ACCESS_COARSE_LOCATION,
             )
+
             if (Build.VERSION.SDK_INT >= 33 && !hasNotificationPermission()) {
                 permissions += Manifest.permission.POST_NOTIFICATIONS
             }
-            requestPermissions(permissions.toTypedArray(), PERMISSION_REQUEST)
+
+            requestPermissions(
+                permissions.toTypedArray(),
+                PERMISSION_REQUEST,
+            )
             return
         }
+
         if (Build.VERSION.SDK_INT >= 33 && !hasNotificationPermission()) {
             requestPermissions(
                 arrayOf(Manifest.permission.POST_NOTIFICATIONS),
@@ -250,6 +449,7 @@ class MainActivity : Activity() {
             )
             return
         }
+
         startDrive()
     }
 
@@ -258,8 +458,14 @@ class MainActivity : Activity() {
         permissions: Array<out String>,
         grantResults: IntArray,
     ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        super.onRequestPermissionsResult(
+            requestCode,
+            permissions,
+            grantResults,
+        )
+
         if (requestCode != PERMISSION_REQUEST) return
+
         if (hasLocationPermission()) {
             startDrive()
         } else {
@@ -273,13 +479,16 @@ class MainActivity : Activity() {
         stateText.text = getString(R.string.starting_gps)
         detailsText.text = getString(R.string.startup_notification_hint)
         updateButton()
+
         try {
             startMonitorService()
         } catch (error: RuntimeException) {
             driveActive = false
+            nearestDefectDistance = -1
             saveDriveState()
             stateText.text = getString(R.string.drive_start_failed)
-            detailsText.text = error.localizedMessage ?: error.javaClass.simpleName
+            detailsText.text =
+                error.localizedMessage ?: error.javaClass.simpleName
             updateButton()
         }
     }
@@ -300,13 +509,17 @@ class MainActivity : Activity() {
     }
 
     private fun hasLocationPermission(): Boolean =
-        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
-            PackageManager.PERMISSION_GRANTED
+        ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
 
     private fun hasNotificationPermission(): Boolean =
         Build.VERSION.SDK_INT < 33 ||
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
 
     private fun saveDriveState() {
         getSharedPreferences(PREFERENCES, MODE_PRIVATE)
@@ -316,24 +529,41 @@ class MainActivity : Activity() {
     }
 
     private fun updateButton() {
-        idleScreen.visibility = if (driveActive) View.GONE else View.VISIBLE
-        mapView.visibility = if (driveActive) View.VISIBLE else View.GONE
-        driveHeader.visibility = if (driveActive) View.VISIBLE else View.GONE
-        stopDriveButton.visibility = if (driveActive) View.VISIBLE else View.GONE
-        val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+        idleScreen.visibility =
+            if (driveActive) View.GONE else View.VISIBLE
+
+        mapView.visibility =
+            if (driveActive) View.VISIBLE else View.GONE
+
+        driveHeader.visibility =
+            if (driveActive) View.VISIBLE else View.GONE
+
+        stopDriveButton.visibility =
+            if (driveActive) View.VISIBLE else View.GONE
+
+        val insetsController =
+            WindowInsetsControllerCompat(window, window.decorView)
+
         if (driveActive) {
             insetsController.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+
             insetsController.hide(WindowInsetsCompat.Type.systemBars())
         } else {
             insetsController.show(WindowInsetsCompat.Type.systemBars())
         }
+
+        renderDefectBadge()
     }
 
     private fun updateDriveMap(mapData: String?) {
         if (mapData.isNullOrBlank()) return
+
         pendingMapData = mapData
-        if (mapPageReady) renderDriveMap(mapData)
+
+        if (mapPageReady) {
+            renderDriveMap(mapData)
+        }
     }
 
     private fun renderDriveMap(mapData: String) {
@@ -348,7 +578,8 @@ class MainActivity : Activity() {
         ViewGroup.LayoutParams.WRAP_CONTENT,
     )
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
 
     companion object {
         private const val PREFERENCES = "drive_state"

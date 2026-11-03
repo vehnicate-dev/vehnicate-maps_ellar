@@ -13,11 +13,12 @@ from supabase import create_client, ClientOptions
 import httpcore
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from aliv_module import AlivRoadDefects
+from aliv_module import AlivRoadDefects, edge_slow_mask
+from aliv_parameter import median_speed_for_interval
 import h3 as h3lib
 import os
 from dotenv import load_dotenv
-from hexagons_update import update_hexagons
+from hexagons_update import update_hexagons, record_trip_passes
 from zoneinfo import ZoneInfo
 from distance import compute_total_distance
 from map_matching import init_map_matcher, map_match_trip
@@ -171,6 +172,11 @@ _SUPABASE_CLIENT_OPTIONS = ClientOptions(
 def _make_supabase_client(url: str, key: str):
     return create_client(url, key, options=_SUPABASE_CLIENT_OPTIONS)
 
+def _record_passes_safe(supabase_target, gps_df) -> None:
+    try:
+        record_trip_passes(supabase_target, gps_df, run=_execute_with_retry)
+    except Exception as err:
+        print(f"[process_trip] pass counting failed: {err!r}")
 
 # ── Retry helper for transient network errors ───────────────────────────────
 # Belt-and-suspenders on top of disabling HTTP/2 above: catches the same
@@ -437,6 +443,9 @@ def enrich_events(
     window: a speedbreaker event is ~1-2s long, so direction won't flip
     mid-event, and taking the mode guards against a stray unmatched point
     near a junction skewing a single-point read.
+
+    The event's median positive GPS speed is stored with its raw score inputs
+    for the database's global parameter normalization.
     """
     enriched = []
 
@@ -446,6 +455,17 @@ def enrich_events(
 
         abs_start_ms_int = int(abs_start_ms.timestamp() * 1000)
         abs_end_ms_int   = int(abs_end_ms.timestamp() * 1000)
+        median_speed_mps = median_speed_for_interval(
+            gps_df["timestamp_ms"].tolist(),
+            gps_df["speed"].tolist(),
+            abs_start_ms_int,
+            abs_end_ms_int,
+        )
+        if median_speed_mps is None:
+            print(
+                f"[aliv] No positive GPS speed for event "
+                f"{abs_start_ms_int}-{abs_end_ms_int}; retaining the unadjusted legacy parameter."
+            )
 
         subset = df[
             (df["timestamp_ms"] >= abs_start_ms_int) &
@@ -497,6 +517,7 @@ def enrich_events(
             "gymax":      event["gymax"],
             "stdp":       event["stdp"],
             "az_rms":     event["az_rms"],
+            "median_speed_mps": median_speed_mps,
             "path":       lat_lon,
             "direction_label": event_direction,
             "osm_way_id": event_way_id,
@@ -840,12 +861,15 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     # ── 4. Run Aliv ──────────────
     aliv_input = build_aliv_input(df)
     result = run_aliv(aliv_input, fs=fs)
+    keep = ~edge_slow_mask(gps_df["latitude"].values, gps_df["longitude"].values, gps_df["speed"].values)
+    pass_df = gps_df[keep]
 
     if not result.get("speedbreakers"):
         print("[process_trip] No events detected.")
+        _record_passes_safe(supabase_target, pass_df)      # NEW
         _mark_aliv_processed(supabase_source, session_id)
         return
-    aliv_trim_offset = 50 * (1000 / fs)
+    aliv_trim_offset = 0 #50 * (1000 / fs)
 
     # ── 5. Enrich events (matched coordinates + direction_label) ───────────────
     enriched_events = enrich_events(
@@ -853,6 +877,7 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     )
     print(f"[process_trip] Enriched events: {len(enriched_events)}")
     if not enriched_events:
+        _record_passes_safe(supabase_target, pass_df)
         _mark_aliv_processed(supabase_source, session_id)
         return
 
@@ -888,6 +913,7 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     except Exception as hex_err:
         print(f"[hexagons] update failed: {hex_err}")
 
+    _record_passes_safe(supabase_target, pass_df)
     _mark_aliv_processed(supabase_source, session_id)
     print("[process_trip] Finished.")
 

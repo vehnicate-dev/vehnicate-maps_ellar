@@ -37,35 +37,60 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
+import java.io.File
 import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 
 class DriveMonitorService : Service() {
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val networkExecutor = Executors.newSingleThreadExecutor()
-    private val httpClient = OkHttpClient()
+
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(40, TimeUnit.SECONDS)
+        .build()
+
     private val h3 by lazy { H3Core.newSystemInstance() }
+
     private val confirmedDefects = linkedMapOf<String, RoadDefect>()
     private val loadedCells = mutableSetOf<Long>()
     private val pendingCells = mutableSetOf<Long>()
-    private val alertedStages = mutableMapOf<String, MutableSet<DefectAlertPolicy.AlertStage>>()
-    private val pendingAnnouncements = ArrayDeque<Int>()
+
+    private val alertedStages =
+        mutableMapOf<String, MutableSet<DefectAlertPolicy.AlertStage>>()
+
+    private val pendingAnnouncements = ArrayDeque<String>()
     private val gpsHistory = ArrayDeque<RoadRoutePredictor.TrackPoint>()
+
     private var currentNeighborCells = emptySet<Long>()
-    private var roadNetwork = RoadRoutePredictor.RoadNetwork(emptyMap(), emptyList())
+    private var roadNetwork =
+        RoadRoutePredictor.RoadNetwork(emptyMap(), emptyList())
+
     private var lastRoadFetchLocation: Location? = null
     private var roadFetchPending = false
     private var nextRoadFetchAllowedAt = 0L
     private var roadNetworkError: String? = null
+
     private var latestPredictedRoute = emptyList<RoadRoutePredictor.Point>()
+
+    private var nearestDefectDistanceMeters: Int? = null
+    private var nearestDefectParameter: Double? = null
+
+    private val announcedStretchDefectIds = mutableSetOf<String>()
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             result.locations.forEach(::onLocationUpdate)
         }
 
-        override fun onLocationAvailability(availability: LocationAvailability) {
+        override fun onLocationAvailability(
+            availability: LocationAvailability,
+        ) {
             if (!availability.isLocationAvailable && monitoringStarted) {
                 publishStatus("Waiting for a high-accuracy GPS fix")
             }
@@ -74,25 +99,36 @@ class DriveMonitorService : Service() {
 
     private lateinit var locationClient: FusedLocationProviderClient
     private lateinit var audioManager: AudioManager
+
     private var textToSpeech: TextToSpeech? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private var wakeLock: PowerManager.WakeLock? = null
+
     private var latestLocation: Location? = null
     private var latestCell = ""
     private var latestSpeedKmh = 0.0
     private var currentState = "Waiting for GPS"
+
     private var monitoringStarted = false
     private var speaking = false
     private var syncError: String? = null
 
     override fun onCreate() {
         super.onCreate()
+
         createNotificationChannel()
-        locationClient = LocationServices.getFusedLocationProviderClient(this)
+
+        locationClient =
+            LocationServices.getFusedLocationProviderClient(this)
+
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    override fun onStartCommand(
+        intent: Intent?,
+        flags: Int,
+        startId: Int,
+    ): Int {
         if (intent?.action == ACTION_STOP) {
             stopMonitoring()
             return START_NOT_STICKY
@@ -103,6 +139,7 @@ class DriveMonitorService : Service() {
                 NOTIFICATION_ID,
                 buildNotification("Waiting for a high-accuracy GPS fix"),
             )
+
             configureSpeech()
             startMonitoring()
         } catch (error: RuntimeException) {
@@ -111,25 +148,52 @@ class DriveMonitorService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+
         return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun checkAndAnnounceStretch(
+        stretch: List<Pair<RoadDefect, Double>>,
+    ) {
+        if (stretch.size < MIN_STRETCH_POINTS) return
+
+        val ids = stretch.map { it.first.id }.toSet()
+
+        // Avoid repeatedly announcing a group containing previously
+        // announced defect points.
+        if (ids.any { it in announcedStretchDefectIds }) {
+            announcedStretchDefectIds.addAll(ids)
+            return
+        }
+
+        announcedStretchDefectIds.addAll(ids)
+        announceUnlaidRoadStretch()
+    }
+
     private fun onLocationUpdate(location: Location) {
         if (!monitoringStarted) return
+
         val nowNanos = SystemClock.elapsedRealtimeNanos()
         val fixAgeNanos = nowNanos - location.elapsedRealtimeNanos
+
         if (fixAgeNanos !in 0..MAX_LOCATION_AGE_NANOS ||
-            latestLocation?.elapsedRealtimeNanos?.let { location.elapsedRealtimeNanos <= it } == true
+            latestLocation?.elapsedRealtimeNanos?.let {
+                location.elapsedRealtimeNanos <= it
+            } == true
         ) {
             return
         }
+
         try {
             processLocation(location)
         } catch (error: RuntimeException) {
             Log.e(TAG, "Could not process the current GPS fix", error)
-            currentState = "Drive stopped: ${error.localizedMessage ?: error.javaClass.simpleName}"
+
+            currentState =
+                "Drive stopped: ${error.localizedMessage ?: error.javaClass.simpleName}"
+
             publishStatus(currentState)
             stopMonitoring()
         }
@@ -137,32 +201,59 @@ class DriveMonitorService : Service() {
 
     private fun processLocation(location: Location) {
         latestLocation = location
-        latestSpeedKmh = if (location.hasSpeed() && location.speed.isFinite()) {
-            location.speed * 3.6
-        } else {
-            0.0
+
+        latestSpeedKmh =
+            if (location.hasSpeed() && location.speed.isFinite()) {
+                location.speed * 3.6
+            } else {
+                0.0
+            }
+
+        val cell = h3.latLngToCell(
+            location.latitude,
+            location.longitude,
+            H3_RESOLUTION,
+        )
+
+        currentNeighborCells = h3.gridDisk(cell, NEIGHBOR_RING).toSet()
+
+        loadedCells.retainAll(currentNeighborCells)
+
+        confirmedDefects.entries.removeAll {
+            it.value.h3Index !in currentNeighborCells
         }
 
-        val cell = h3.latLngToCell(location.latitude, location.longitude, H3_RESOLUTION)
-        currentNeighborCells = h3.gridDisk(cell, NEIGHBOR_RING).toSet()
-        loadedCells.retainAll(currentNeighborCells)
-        confirmedDefects.entries.removeAll { it.value.h3Index !in currentNeighborCells }
         latestCell = h3.h3ToString(cell)
+
         ensureNeighborCellsLoaded(cell)
         ensureRoadNetworkLoaded(location)
 
-        if (!location.hasAccuracy() || location.accuracy > MAX_ALERT_ACCURACY_METERS) {
-            publishStatus(syncError ?: "Improving GPS accuracy before alerts")
+        if (!location.hasAccuracy() ||
+            location.accuracy > MAX_ALERT_ACCURACY_METERS
+        ) {
+            nearestDefectDistanceMeters = null
+            nearestDefectParameter = null
+
+            publishStatus(
+                syncError ?: "Improving GPS accuracy before alerts",
+            )
             return
         }
 
         if (latestSpeedKmh < MIN_ALERT_SPEED_KMH ||
             !location.hasBearing() ||
             (location.hasBearingAccuracy() &&
-                location.bearingAccuracyDegrees > MAX_BEARING_ACCURACY_DEGREES)
+                location.bearingAccuracyDegrees >
+                MAX_BEARING_ACCURACY_DEGREES)
         ) {
             latestPredictedRoute = emptyList()
-            publishStatus(syncError ?: "Waiting for a reliable direction of travel")
+
+            nearestDefectDistanceMeters = null
+            nearestDefectParameter = null
+
+            publishStatus(
+                syncError ?: "Waiting for a reliable direction of travel",
+            )
             return
         }
 
@@ -173,7 +264,11 @@ class DriveMonitorService : Service() {
                 location.bearing.toDouble(),
             ),
         )
-        while (gpsHistory.size > MAX_GPS_HISTORY_POINTS) gpsHistory.removeFirst()
+
+        while (gpsHistory.size > MAX_GPS_HISTORY_POINTS) {
+            gpsHistory.removeFirst()
+        }
+
         updatePredictedRoute()
         evaluateNearbyDefects(location, latestSpeedKmh)
         publishDriveStatus()
@@ -181,10 +276,12 @@ class DriveMonitorService : Service() {
 
     private fun startMonitoring() {
         if (monitoringStarted) return
+
         val fineGranted = ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.ACCESS_FINE_LOCATION,
         ) == PackageManager.PERMISSION_GRANTED
+
         if (!fineGranted) {
             publishStatus("Precise location permission is required")
             stopSelf()
@@ -193,7 +290,9 @@ class DriveMonitorService : Service() {
 
         monitoringStarted = true
         currentState = "Waiting for a high-accuracy GPS fix"
+
         acquireWakeLock()
+
         try {
             val request = LocationRequest.Builder(
                 Priority.PRIORITY_HIGH_ACCURACY,
@@ -204,12 +303,18 @@ class DriveMonitorService : Service() {
                 .setMaxUpdateDelayMillis(0)
                 .setWaitForAccurateLocation(true)
                 .build()
-            locationClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
-                .addOnFailureListener(::onLocationRequestFailed)
+
+            locationClient.requestLocationUpdates(
+                request,
+                locationCallback,
+                Looper.getMainLooper(),
+            ).addOnFailureListener(::onLocationRequestFailed)
+
             publishStatus(currentState)
         } catch (error: SecurityException) {
             monitoringStarted = false
             currentState = "Location permission was revoked"
+
             publishStatus(currentState)
             releaseWakeLock()
             stopSelf()
@@ -218,12 +323,22 @@ class DriveMonitorService : Service() {
 
     private fun onLocationRequestFailed(error: Exception) {
         if (!monitoringStarted) return
-        Log.e(TAG, "Could not request high-accuracy location updates", error)
+
+        Log.e(
+            TAG,
+            "Could not request high-accuracy location updates",
+            error,
+        )
+
         monitoringStarted = false
-        currentState = "High-accuracy GPS unavailable: ${error.localizedMessage ?: error.javaClass.simpleName}"
+
+        currentState =
+            "High-accuracy GPS unavailable: ${error.localizedMessage ?: error.javaClass.simpleName}"
+
         releaseWakeLock()
         recordStoppedState()
         publishStatus(currentState)
+
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -231,50 +346,80 @@ class DriveMonitorService : Service() {
     private fun ensureNeighborCellsLoaded(centerCell: Long) {
         val cellsToLoad = h3.gridDisk(centerCell, NEIGHBOR_RING)
             .filter { it !in loadedCells && it !in pendingCells }
+
         if (cellsToLoad.isEmpty()) return
 
         pendingCells.addAll(cellsToLoad)
+
         networkExecutor.execute {
             try {
                 val fetched = fetchConfirmedDefects(cellsToLoad)
+
                 mainHandler.post {
                     pendingCells.removeAll(cellsToLoad.toSet())
-                    loadedCells.addAll(cellsToLoad.filter { it in currentNeighborCells })
-                    fetched.filter { it.h3Index in currentNeighborCells }
-                        .forEach { confirmedDefects[it.id] = it }
+
+                    loadedCells.addAll(
+                        cellsToLoad.filter {
+                            it in currentNeighborCells
+                        },
+                    )
+
+                    fetched
+                        .filter { it.h3Index in currentNeighborCells }
+                        .forEach {
+                            confirmedDefects[it.id] = it
+                        }
+
                     syncError = null
+
                     latestLocation?.let { location ->
                         if (location.hasAccuracy() &&
                             location.accuracy <= MAX_ALERT_ACCURACY_METERS &&
                             location.hasBearing() &&
                             latestSpeedKmh >= MIN_ALERT_SPEED_KMH
                         ) {
-                            evaluateNearbyDefects(location, latestSpeedKmh)
+                            evaluateNearbyDefects(
+                                location,
+                                latestSpeedKmh,
+                            )
                         }
                     }
+
                     publishDriveStatus()
                 }
             } catch (error: IOException) {
                 Log.e(TAG, "Could not load confirmed defects", error)
+
                 mainHandler.post {
                     pendingCells.removeAll(cellsToLoad.toSet())
-                    syncError = "Defect sync failed: ${error.message ?: "network error"}"
+
+                    syncError =
+                        "Defect sync failed: ${error.message ?: "network error"}"
+
                     currentState = syncError ?: "Defect sync failed"
                     publishStatus(currentState)
                 }
             } catch (error: JSONException) {
                 Log.e(TAG, "Could not parse confirmed defects", error)
+
                 mainHandler.post {
                     pendingCells.removeAll(cellsToLoad.toSet())
-                    syncError = "Defect sync failed: invalid server response"
+
+                    syncError =
+                        "Defect sync failed: invalid server response"
+
                     currentState = syncError ?: "Defect sync failed"
                     publishStatus(currentState)
                 }
             } catch (error: RuntimeException) {
                 Log.e(TAG, "Could not process confirmed defects", error)
+
                 mainHandler.post {
                     pendingCells.removeAll(cellsToLoad.toSet())
-                    syncError = "Defect sync failed: ${error.localizedMessage ?: error.javaClass.simpleName}"
+
+                    syncError =
+                        "Defect sync failed: ${error.localizedMessage ?: error.javaClass.simpleName}"
+
                     currentState = syncError ?: "Defect sync failed"
                     publishStatus(currentState)
                 }
@@ -283,77 +428,156 @@ class DriveMonitorService : Service() {
     }
 
     @Throws(IOException::class, JSONException::class)
-    private fun fetchConfirmedDefects(cells: List<Long>): List<RoadDefect> {
-        val endpoint = "${BuildConfig.SUPABASE_URL.trimEnd('/')}/rest/v1/hexagons"
-            .toHttpUrl()
-            .newBuilder()
-            .addQueryParameter(
-                "select",
-                "id,h3_index,lat,lon,confirmed,jerk_values,parameter",
-            )
-            .addQueryParameter("confirmed", "eq.true")
-            .addQueryParameter(
-                "h3_index",
-                "in.(${cells.joinToString(",") { h3.h3ToString(it) }})",
-            )
-            .build()
+    private fun fetchConfirmedDefects(
+        cells: List<Long>,
+    ): List<RoadDefect> {
+        val endpoint =
+            "${BuildConfig.SUPABASE_URL.trimEnd('/')}/rest/v1/hexagons"
+                .toHttpUrl()
+                .newBuilder()
+                .addQueryParameter(
+                    "select",
+                    "id,h3_index,lat,lon,confirmed,jerk_values,parameter,rd_trip_ids",
+                )
+                .addQueryParameter("confirmed", "eq.true")
+                .addQueryParameter(
+                    "h3_index",
+                    "in.(${cells.joinToString(",") { h3.h3ToString(it) }})",
+                )
+                .build()
 
         val rows = mutableListOf<RoadDefect>()
         var offset = 0
+
         while (true) {
             val request = Request.Builder()
                 .url(endpoint)
-                .header("apikey", BuildConfig.SUPABASE_PUBLISHABLE_KEY)
-                .header("Authorization", "Bearer ${BuildConfig.SUPABASE_PUBLISHABLE_KEY}")
+                .header(
+                    "apikey",
+                    BuildConfig.SUPABASE_PUBLISHABLE_KEY,
+                )
+                .header(
+                    "Authorization",
+                    "Bearer ${BuildConfig.SUPABASE_PUBLISHABLE_KEY}",
+                )
                 .header("Range-Unit", "items")
-                .header("Range", "$offset-${offset + PAGE_SIZE - 1}")
+                .header(
+                    "Range",
+                    "$offset-${offset + PAGE_SIZE - 1}",
+                )
                 .get()
                 .build()
 
-            val batchSize = httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw IOException("Supabase returned HTTP ${response.code}")
-                }
-                val body = response.body?.string()
-                    ?: throw IOException("Supabase returned an empty response")
-                val batch = JSONArray(body)
-                for (index in 0 until batch.length()) {
-                    val row = batch.getJSONObject(index)
-                    if (!row.optBoolean("confirmed", false)) continue
-                    val jerkArray = row.optJSONArray("jerk_values") ?: continue
-                    val jerkValues = List(jerkArray.length()) { jerkIndex ->
-                        jerkArray.optDouble(jerkIndex, Double.NaN)
+            val batchSize = httpClient.newCall(request)
+                .execute()
+                .use { response ->
+                    if (!response.isSuccessful) {
+                        throw IOException(
+                            "Supabase returned HTTP ${response.code}",
+                        )
                     }
-                    if (!DefectAlertPolicy.hasPositiveMaximumJerk(jerkValues)) continue
-                    val id = row.optString("id").takeUnless { it.isBlank() || it == "null" }
-                        ?: continue
-                    val h3Index = row.optString("h3_index")
-                        .takeUnless { it.isBlank() || it == "null" }
-                        ?: continue
-                    val cell = try {
-                        h3.stringToH3(h3Index)
-                    } catch (error: IllegalArgumentException) {
-                        throw JSONException("Supabase returned an invalid H3 index")
+
+                    val body = response.body?.string()
+                        ?: throw IOException(
+                            "Supabase returned an empty response",
+                        )
+
+                    val batch = JSONArray(body)
+
+                    for (index in 0 until batch.length()) {
+                        val row = batch.getJSONObject(index)
+
+                        if (!row.optBoolean("confirmed", false)) {
+                            continue
+                        }
+
+                        val tripIds =
+                            row.optJSONArray("rd_trip_ids") ?: continue
+
+                        if (tripIds.length() <= 2) continue
+
+                        val jerkArray = row.optJSONArray("jerk_values")
+
+                        val jerkValues =
+                            if (jerkArray != null) {
+                                List(jerkArray.length()) { jerkIndex ->
+                                    jerkArray.optDouble(
+                                        jerkIndex,
+                                        Double.NaN,
+                                    )
+                                }
+                            } else {
+                                emptyList()
+                            }
+
+                        // Keep every confirmed point for map rendering.
+                        // Only eligible points can trigger individual alerts.
+                        val alertEligible =
+                            DefectAlertPolicy.hasMaximumJerkAtLeast(
+                                jerkValues,
+                            )
+
+                        val id = row.optString("id")
+                            .takeUnless {
+                                it.isBlank() || it == "null"
+                            } ?: continue
+
+                        val h3Index = row.optString("h3_index")
+                            .takeUnless {
+                                it.isBlank() || it == "null"
+                            } ?: continue
+
+                        val cell = try {
+                            h3.stringToH3(h3Index)
+                        } catch (error: IllegalArgumentException) {
+                            throw JSONException(
+                                "Supabase returned an invalid H3 index",
+                            )
+                        }
+
+                        val lat = row.optDouble("lat", Double.NaN)
+                        val lon = row.optDouble("lon", Double.NaN)
+                        val parameter = row.optDouble("parameter", 0.0)
+
+                        if (!lat.isFinite() ||
+                            !lon.isFinite() ||
+                            cell !in cells
+                        ) {
+                            continue
+                        }
+
+                        rows += RoadDefect(
+                            id = id,
+                            h3Index = cell,
+                            latitude = lat,
+                            longitude = lon,
+                            parameter = parameter,
+                            alertEligible = alertEligible,
+                        )
                     }
-                    val lat = row.optDouble("lat", Double.NaN)
-                    val lon = row.optDouble("lon", Double.NaN)
-                    val parameter = row.optDouble("parameter", 0.0)
-                    if (!lat.isFinite() || !lon.isFinite() || cell !in cells) continue
-                    rows += RoadDefect(id, cell, lat, lon, parameter)
+
+                    batch.length()
                 }
-                batch.length()
-            }
+
             if (batchSize < PAGE_SIZE) break
             offset += batchSize
         }
+
         return rows
     }
 
     private fun ensureRoadNetworkLoaded(location: Location) {
-        if (roadFetchPending || SystemClock.elapsedRealtime() < nextRoadFetchAllowedAt) return
+        if (roadFetchPending ||
+            SystemClock.elapsedRealtime() < nextRoadFetchAllowedAt
+        ) {
+            return
+        }
+
         val previousFetch = lastRoadFetchLocation
+
         if (previousFetch != null) {
             val result = FloatArray(1)
+
             Location.distanceBetween(
                 previousFetch.latitude,
                 previousFetch.longitude,
@@ -361,59 +585,99 @@ class DriveMonitorService : Service() {
                 location.longitude,
                 result,
             )
-            if (result[0] < ROAD_FETCH_REFRESH_DISTANCE_METERS) return
+
+            if (result[0] < ROAD_FETCH_REFRESH_DISTANCE_METERS) {
+                return
+            }
         }
 
         roadFetchPending = true
         val fetchLocation = Location(location)
+
         networkExecutor.execute {
             try {
                 val fetchedNetwork = fetchRoadNetwork(fetchLocation)
+
                 mainHandler.post {
                     roadFetchPending = false
                     roadNetwork = fetchedNetwork
                     lastRoadFetchLocation = fetchLocation
                     roadNetworkError = null
+
                     latestLocation?.let { latest ->
                         updatePredictedRoute()
+
                         if (latest.hasAccuracy() &&
                             latest.accuracy <= MAX_ALERT_ACCURACY_METERS &&
                             latest.hasBearing() &&
                             latestSpeedKmh >= MIN_ALERT_SPEED_KMH
                         ) {
-                            evaluateNearbyDefects(latest, latestSpeedKmh)
+                            evaluateNearbyDefects(
+                                latest,
+                                latestSpeedKmh,
+                            )
                         }
                     }
+
                     publishDriveStatus()
                 }
             } catch (error: IOException) {
-                Log.e(TAG, "Could not load nearby OpenStreetMap roads", error)
+                Log.e(
+                    TAG,
+                    "Could not load nearby OpenStreetMap roads",
+                    error,
+                )
+
                 mainHandler.post {
                     roadFetchPending = false
+
                     nextRoadFetchAllowedAt =
-                        SystemClock.elapsedRealtime() + ROAD_FETCH_RETRY_DELAY_MS
-                    roadNetworkError = "Road data unavailable: ${error.message ?: "network error"}"
+                        SystemClock.elapsedRealtime() +
+                        ROAD_FETCH_RETRY_DELAY_MS
+
+                    roadNetworkError =
+                        "Road data unavailable: ${error.message ?: "network error"}"
+
                     latestPredictedRoute = emptyList()
                     publishDriveStatus()
                 }
             } catch (error: JSONException) {
-                Log.e(TAG, "Could not parse nearby OpenStreetMap roads", error)
+                Log.e(
+                    TAG,
+                    "Could not parse nearby OpenStreetMap roads",
+                    error,
+                )
+
                 mainHandler.post {
                     roadFetchPending = false
+
                     nextRoadFetchAllowedAt =
-                        SystemClock.elapsedRealtime() + ROAD_FETCH_RETRY_DELAY_MS
-                    roadNetworkError = "Road data unavailable: invalid server response"
+                        SystemClock.elapsedRealtime() +
+                        ROAD_FETCH_RETRY_DELAY_MS
+
+                    roadNetworkError =
+                        "Road data unavailable: invalid server response"
+
                     latestPredictedRoute = emptyList()
                     publishDriveStatus()
                 }
             } catch (error: RuntimeException) {
-                Log.e(TAG, "Could not process nearby OpenStreetMap roads", error)
+                Log.e(
+                    TAG,
+                    "Could not process nearby OpenStreetMap roads",
+                    error,
+                )
+
                 mainHandler.post {
                     roadFetchPending = false
+
                     nextRoadFetchAllowedAt =
-                        SystemClock.elapsedRealtime() + ROAD_FETCH_RETRY_DELAY_MS
+                        SystemClock.elapsedRealtime() +
+                        ROAD_FETCH_RETRY_DELAY_MS
+
                     roadNetworkError =
                         "Road data unavailable: ${error.localizedMessage ?: error.javaClass.simpleName}"
+
                     latestPredictedRoute = emptyList()
                     publishDriveStatus()
                 }
@@ -422,55 +686,111 @@ class DriveMonitorService : Service() {
     }
 
     @Throws(IOException::class, JSONException::class)
-    private fun fetchRoadNetwork(location: Location): RoadRoutePredictor.RoadNetwork {
-        val latitude = String.format(Locale.US, "%.3f", location.latitude)
-        val longitude = String.format(Locale.US, "%.3f", location.longitude)
+    private fun fetchRoadNetwork(
+        location: Location,
+    ): RoadRoutePredictor.RoadNetwork {
+        val latitude = String.format(
+            Locale.US,
+            "%.3f",
+            location.latitude,
+        )
+
+        val longitude = String.format(
+            Locale.US,
+            "%.3f",
+            location.longitude,
+        )
+
         val query = """
             [out:json][timeout:20];
-            way(around:$ROAD_FETCH_RADIUS_METERS,$latitude,$longitude)["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|road|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link)$"];
+            way(around:$ROAD_FETCH_RADIUS_METERS,$latitude,$longitude)["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|road|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link)$"];
             out body;
             >;
             out skel qt;
         """.trimIndent()
-        val endpoint = OVERPASS_URL.toHttpUrl()
-        val request = Request.Builder()
-            .url(endpoint)
-            .header("User-Agent", OVERPASS_USER_AGENT)
-            .post(FormBody.Builder().add("data", query).build())
-            .build()
 
-        val responseBody = httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("OpenStreetMap Overpass returned HTTP ${response.code}")
-            }
-            response.body?.string()
-                ?: throw IOException("OpenStreetMap Overpass returned an empty response")
+        val cacheFile = File(
+            cacheDir,
+            String.format(
+                Locale.US,
+                "roads_%.2f_%.2f.json",
+                location.latitude,
+                location.longitude,
+            ),
+        )
+
+        var loadedFromNetwork = true
+
+        val responseBody = try {
+            requestOverpass(query)
+        } catch (error: IOException) {
+            if (!cacheFile.exists()) throw error
+
+            Log.w(
+                TAG,
+                "All Overpass servers failed, using cached roads: ${error.message}",
+            )
+
+            loadedFromNetwork = false
+            cacheFile.readText()
         }
-        val elements = JSONObject(responseBody).optJSONArray("elements")
-            ?: throw JSONException("OpenStreetMap Overpass returned no elements")
-        val nodes = mutableMapOf<Long, RoadRoutePredictor.RoadNode>()
+
+        val elements = JSONObject(responseBody)
+            .optJSONArray("elements")
+            ?: throw JSONException(
+                "OpenStreetMap Overpass returned no elements",
+            )
+
+        val nodes =
+            mutableMapOf<Long, RoadRoutePredictor.RoadNode>()
+
         for (index in 0 until elements.length()) {
             val element = elements.getJSONObject(index)
+
             if (element.optString("type") != "node") continue
+
             val id = element.optLong("id", -1L)
-            val latitude = element.optDouble("lat", Double.NaN)
-            val longitude = element.optDouble("lon", Double.NaN)
-            if (id >= 0L && latitude.isFinite() && longitude.isFinite()) {
-                nodes[id] = RoadRoutePredictor.RoadNode(id, latitude, longitude)
+            val latitudeValue =
+                element.optDouble("lat", Double.NaN)
+            val longitudeValue =
+                element.optDouble("lon", Double.NaN)
+
+            if (id >= 0L &&
+                latitudeValue.isFinite() &&
+                longitudeValue.isFinite()
+            ) {
+                nodes[id] = RoadRoutePredictor.RoadNode(
+                    id,
+                    latitudeValue,
+                    longitudeValue,
+                )
             }
         }
 
         val ways = mutableListOf<RoadRoutePredictor.RoadWay>()
+
         for (index in 0 until elements.length()) {
             val element = elements.getJSONObject(index)
+
             if (element.optString("type") != "way") continue
+
             val tags = element.optJSONObject("tags") ?: continue
-            if (tags.optString("highway") !in DRIVABLE_HIGHWAY_TYPES) continue
+
+            if (tags.optString("highway") !in DRIVABLE_HIGHWAY_TYPES) {
+                continue
+            }
+
             val nodeArray = element.optJSONArray("nodes") ?: continue
-            val nodeIds = List(nodeArray.length()) { nodeArray.getLong(it) }
-                .filter { it in nodes }
+
+            val nodeIds =
+                List(nodeArray.length()) { nodeArray.getLong(it) }
+                    .filter { it in nodes }
+
             if (nodeIds.size < 2) continue
-            val oneWay = tags.optString("oneway").lowercase(Locale.ROOT)
+
+            val oneWay =
+                tags.optString("oneway").lowercase(Locale.ROOT)
+
             ways += RoadRoutePredictor.RoadWay(
                 id = element.optLong("id"),
                 nodeIds = nodeIds,
@@ -478,10 +798,62 @@ class DriveMonitorService : Service() {
                 reverseOneWay = oneWay == "-1",
             )
         }
+
         if (ways.isEmpty()) {
-            throw IOException("OpenStreetMap Overpass returned no nearby drivable roads")
+            throw IOException(
+                "OpenStreetMap Overpass returned no nearby drivable roads",
+            )
         }
+
+        if (loadedFromNetwork) {
+            try {
+                cacheFile.writeText(responseBody)
+            } catch (error: IOException) {
+                Log.w(TAG, "Could not cache road data", error)
+            }
+        }
+
         return RoadRoutePredictor.RoadNetwork(nodes, ways)
+    }
+
+    /** Tries each Overpass mirror in order. */
+    @Throws(IOException::class)
+    private fun requestOverpass(query: String): String {
+        var lastError: IOException? = null
+
+        for (url in OVERPASS_URLS) {
+            try {
+                val request = Request.Builder()
+                    .url(url.toHttpUrl())
+                    .header("User-Agent", OVERPASS_USER_AGENT)
+                    .post(
+                        FormBody.Builder()
+                            .add("data", query)
+                            .build(),
+                    )
+                    .build()
+
+                return httpClient.newCall(request)
+                    .execute()
+                    .use { response ->
+                        if (!response.isSuccessful) {
+                            throw IOException(
+                                "OpenStreetMap Overpass returned HTTP ${response.code} (${request.url.host})",
+                            )
+                        }
+
+                        response.body?.string()
+                            ?: throw IOException(
+                                "OpenStreetMap Overpass returned an empty response",
+                            )
+                    }
+            } catch (error: IOException) {
+                Log.w(TAG, "Overpass server failed: ${error.message}")
+                lastError = error
+            }
+        }
+
+        throw lastError ?: IOException("No Overpass server reachable")
     }
 
     private fun updatePredictedRoute() {
@@ -492,28 +864,99 @@ class DriveMonitorService : Service() {
         )
     }
 
-    private fun evaluateNearbyDefects(location: Location, speedKmh: Double) {
-        if (!location.hasAccuracy() || location.accuracy > MAX_ALERT_ACCURACY_METERS) return
-        if (latestPredictedRoute.size < 2) return
-        val nextDefect = confirmedDefects.values
-            .asSequence()
-            .mapNotNull { defect ->
-                val distanceAlongRoute = RoadRoutePredictor.distanceAlongRoute(
+    private fun evaluateNearbyDefects(
+        location: Location,
+        speedKmh: Double,
+    ) {
+        if (!location.hasAccuracy() ||
+            location.accuracy > MAX_ALERT_ACCURACY_METERS
+        ) {
+            nearestDefectDistanceMeters = null
+            nearestDefectParameter = null
+            return
+        }
+
+        val useRoute = latestPredictedRoute.size >= 2
+
+        if (!useRoute && !location.hasBearing()) {
+            nearestDefectDistanceMeters = null
+            nearestDefectParameter = null
+            return
+        }
+
+        fun distanceAhead(defect: RoadDefect): Double? {
+            return if (useRoute) {
+                RoadRoutePredictor.distanceAlongRoute(
                     defect.latitude,
                     defect.longitude,
                     latestPredictedRoute,
                     (ROAD_ALERT_CORRIDOR_METERS + location.accuracy)
-                        .coerceAtMost(MAX_ROAD_ALERT_CORRIDOR_METERS),
-                )?.takeIf { it > location.accuracy } ?: return@mapNotNull null
-                defect to distanceAlongRoute
+                        .coerceAtMost(
+                            MAX_ROAD_ALERT_CORRIDOR_METERS,
+                        ),
+                )?.takeIf {
+                    it > location.accuracy
+                }
+            } else {
+                straightLineDistanceAhead(location, defect)
             }
-            .minByOrNull { it.second }
-            ?: return
+        }
 
-        val (defect, distanceAhead) = nextDefect
-        val defectStages = alertedStages.getOrPut(defect.id) { mutableSetOf() }
+        val upcomingPoints = confirmedDefects.values
+            .mapNotNull { defect ->
+                val distance = distanceAhead(defect)
+                    ?: return@mapNotNull null
+
+                if (distance > PREDICTED_TRAJECTORY_METERS) {
+                    return@mapNotNull null
+                }
+
+                defect to distance
+            }
+            .sortedBy { it.second }
+
+        // The badge follows the nearest upcoming plotted defect,
+        // regardless of whether its jerk qualifies for a spoken alert.
+        val nextMapDefect = upcomingPoints.firstOrNull()
+
+        nearestDefectDistanceMeters =
+            nextMapDefect?.second?.roundToInt()
+
+        nearestDefectParameter =
+            nextMapDefect?.first?.parameter
+
+        // Find continuous groups of nearby plotted points.
+        // This is a spatial heuristic, not direct road-surface detection.
+        val stretch = mutableListOf<Pair<RoadDefect, Double>>()
+
+        for (point in upcomingPoints) {
+            if (stretch.isNotEmpty() &&
+                point.second - stretch.last().second >
+                MAX_STRETCH_POINT_GAP_METERS
+            ) {
+                checkAndAnnounceStretch(stretch)
+                stretch.clear()
+            }
+
+            stretch.add(point)
+        }
+
+        checkAndAnnounceStretch(stretch)
+
+        // Individual spoken alerts only apply to defects whose jerk
+        // values include at least one finite value >= 0.1.
+        val nextDefect = upcomingPoints.firstOrNull {
+            it.first.alertEligible
+        } ?: return
+
+        val (defect, distanceAheadMeters) = nextDefect
+
+        val defectStages = alertedStages.getOrPut(defect.id) {
+            mutableSetOf()
+        }
+
         val decision = DefectAlertPolicy.nextAlertDecision(
-            distanceAhead,
+            distanceAheadMeters,
             speedKmh,
             defectStages,
         ) ?: return
@@ -522,12 +965,43 @@ class DriveMonitorService : Service() {
         announceRoadDefect(decision.distanceMeters)
     }
 
+    /** Distance to a defect along the current heading, or null if it is not ahead. */
+    private fun straightLineDistanceAhead(
+        location: Location,
+        defect: RoadDefect,
+    ): Double? {
+        val results = FloatArray(2)
+
+        Location.distanceBetween(
+            location.latitude,
+            location.longitude,
+            defect.latitude,
+            defect.longitude,
+            results,
+        )
+
+        val bearingToDefect =
+            (results[1].toDouble() + 360.0) % 360.0
+
+        return DefectAlertPolicy.distanceAheadInTravelCorridor(
+            results[0].toDouble(),
+            bearingToDefect,
+            location.bearing.toDouble(),
+            location.accuracy.toDouble(),
+        )
+    }
+
     private fun configureSpeech() {
         val attributes = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+            .setUsage(
+                AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE,
+            )
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
-        audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+
+        audioFocusRequest = AudioFocusRequest.Builder(
+            AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
+        )
             .setAudioAttributes(attributes)
             .setOnAudioFocusChangeListener { }
             .setWillPauseWhenDucked(false)
@@ -539,84 +1013,132 @@ class DriveMonitorService : Service() {
                 publishStatus(currentState)
                 return@TextToSpeech
             }
+
             try {
                 val speech = textToSpeech ?: return@TextToSpeech
+
                 val preferredLocale = Locale.Builder()
                     .setLanguage("en")
                     .setRegion("IN")
                     .build()
-                if (speech.isLanguageAvailable(preferredLocale) >= TextToSpeech.LANG_AVAILABLE) {
+
+                if (speech.isLanguageAvailable(preferredLocale) >=
+                    TextToSpeech.LANG_AVAILABLE
+                ) {
                     speech.language = preferredLocale
                 } else {
                     speech.language = Locale.US
                 }
+
                 speech.setSpeechRate(0.92f)
                 speech.setPitch(1.12f)
                 speech.setAudioAttributes(attributes)
+
                 speech.voices
                     ?.filter { it.locale.language == "en" }
-                    ?.sortedByDescending { it.name.contains("female", ignoreCase = true) }
+                    ?.sortedByDescending {
+                        it.name.contains("female", ignoreCase = true)
+                    }
                     ?.firstOrNull()
                     ?.let { speech.voice = it }
-                speech.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) = Unit
-                    override fun onDone(utteranceId: String?) {
-                        mainHandler.post { onAnnouncementFinished() }
-                    }
-                    @Deprecated("Deprecated by Android.")
-                    override fun onError(utteranceId: String?) {
-                        mainHandler.post { onAnnouncementFinished() }
-                    }
-                    override fun onError(utteranceId: String?, errorCode: Int) {
-                        mainHandler.post { onAnnouncementFinished() }
-                    }
-                })
+
+                speech.setOnUtteranceProgressListener(
+                    object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) = Unit
+
+                        override fun onDone(utteranceId: String?) {
+                            mainHandler.post {
+                                onAnnouncementFinished()
+                            }
+                        }
+
+                        @Deprecated("Deprecated by Android.")
+                        override fun onError(utteranceId: String?) {
+                            mainHandler.post {
+                                onAnnouncementFinished()
+                            }
+                        }
+
+                        override fun onError(
+                            utteranceId: String?,
+                            errorCode: Int,
+                        ) {
+                            mainHandler.post {
+                                onAnnouncementFinished()
+                            }
+                        }
+                    },
+                )
+
                 playNextAnnouncement()
             } catch (error: RuntimeException) {
                 Log.e(TAG, "Could not configure text-to-speech", error)
+
                 textToSpeech?.shutdown()
                 textToSpeech = null
-                currentState = "Speech unavailable: ${error.localizedMessage ?: error.javaClass.simpleName}"
+
+                currentState =
+                    "Speech unavailable: ${error.localizedMessage ?: error.javaClass.simpleName}"
+
                 publishStatus(currentState)
             }
         }
     }
 
     private fun announceRoadDefect(distanceMeters: Int) {
-        pendingAnnouncements.addLast(distanceMeters)
+        pendingAnnouncements.addLast(
+            "Road defect in $distanceMeters meters",
+        )
+        playNextAnnouncement()
+    }
+
+    private fun announceUnlaidRoadStretch() {
+        pendingAnnouncements.addLast(
+            "Stretch of unlaid roads, please be careful",
+        )
         playNextAnnouncement()
     }
 
     private fun playNextAnnouncement() {
         val speech = textToSpeech ?: return
+
         if (speaking || pendingAnnouncements.isEmpty()) return
 
         audioFocusRequest?.let { request ->
             val result = audioManager.requestAudioFocus(request)
+
             if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                currentState = "Audio focus unavailable; alerting without ducking"
+                currentState =
+                    "Audio focus unavailable; alerting without ducking"
+
                 publishStatus(currentState)
             }
         }
-        val distanceMeters = pendingAnnouncements.removeFirst()
+
+        val message = pendingAnnouncements.removeFirst()
         speaking = true
+
         val result = speech.speak(
-            "Road defect in $distanceMeters meters",
-            TextToSpeech.QUEUE_FLUSH,
+            message,
+            TextToSpeech.QUEUE_ADD,
             null,
             UTTERANCE_ID,
         )
+
         if (result == TextToSpeech.ERROR) {
             speaking = false
             releaseAudioFocus()
+
             currentState = "Speech engine failed to play an alert"
             publishStatus(currentState)
+
             playNextAnnouncement()
         }
     }
 
     private fun onAnnouncementFinished() {
         speaking = false
+
         if (pendingAnnouncements.isEmpty()) {
             releaseAudioFocus()
         } else {
@@ -625,19 +1147,28 @@ class DriveMonitorService : Service() {
     }
 
     private fun releaseAudioFocus() {
-        audioFocusRequest?.let(audioManager::abandonAudioFocusRequest)
+        audioFocusRequest?.let {
+            audioManager.abandonAudioFocusRequest(it)
+        }
     }
 
     private fun acquireWakeLock() {
-        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+        val powerManager =
+            getSystemService(POWER_SERVICE) as PowerManager
+
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "$TAG:drive-monitor",
-        ).apply { acquire(MAX_WAKE_LOCK_MS) }
+        ).apply {
+            acquire(MAX_WAKE_LOCK_MS)
+        }
     }
 
     private fun releaseWakeLock() {
-        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock?.let {
+            if (it.isHeld) it.release()
+        }
+
         wakeLock = null
     }
 
@@ -645,20 +1176,33 @@ class DriveMonitorService : Service() {
         if (monitoringStarted) {
             locationClient.removeLocationUpdates(locationCallback)
                 .addOnFailureListener { error ->
-                    Log.e(TAG, "Could not remove location updates", error)
+                    Log.e(
+                        TAG,
+                        "Could not remove location updates",
+                        error,
+                    )
                 }
         }
+
         monitoringStarted = false
         pendingAnnouncements.clear()
         speaking = false
+
+        nearestDefectDistanceMeters = null
+        nearestDefectParameter = null
+
         releaseWakeLock()
         releaseAudioFocus()
+
         networkExecutor.shutdownNow()
+
         textToSpeech?.stop()
         textToSpeech?.shutdown()
         textToSpeech = null
+
         recordStoppedState()
         publishStatus("Drive stopped")
+
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -668,17 +1212,24 @@ class DriveMonitorService : Service() {
             .edit()
             .putBoolean(DRIVE_ACTIVE, false)
             .apply()
+
         sendBroadcast(
             Intent(ACTION_STATUS)
                 .setPackage(packageName)
-                .putExtra(EXTRA_STATE, getString(R.string.drive_stopped))
-                .putExtra(EXTRA_RUNNING, false),
+                .putExtra(
+                    EXTRA_STATE,
+                    getString(R.string.drive_stopped),
+                )
+                .putExtra(EXTRA_RUNNING, false)
+                .putExtra(EXTRA_NEAREST_DEFECT_DISTANCE, -1)
+                .putExtra(EXTRA_NEAREST_DEFECT_PARAMETER, 0.0),
         )
     }
 
     private fun publishStatus(state: String) {
         currentState = state
         updateNotification(state)
+
         sendBroadcast(
             Intent(ACTION_STATUS)
                 .setPackage(packageName)
@@ -686,62 +1237,110 @@ class DriveMonitorService : Service() {
                 .putExtra(EXTRA_SPEED_KMH, latestSpeedKmh)
                 .putExtra(EXTRA_CELL, latestCell)
                 .putExtra(EXTRA_DEFECT_COUNT, confirmedDefects.size)
-                .putExtra(EXTRA_MAP_DATA, if (monitoringStarted) buildMapData() else null)
+                .putExtra(
+                    EXTRA_MAP_DATA,
+                    if (monitoringStarted) buildMapData() else null,
+                )
+                .putExtra(
+                    EXTRA_NEAREST_DEFECT_DISTANCE,
+                    nearestDefectDistanceMeters ?: -1,
+                )
+                .putExtra(
+                    EXTRA_NEAREST_DEFECT_PARAMETER,
+                    nearestDefectParameter ?: 0.0,
+                )
                 .putExtra(EXTRA_RUNNING, monitoringStarted),
         )
     }
 
     private fun buildMapData(): String? {
         val location = latestLocation ?: return null
+
         val cells = currentNeighborCells.ifEmpty {
-            setOf(h3.latLngToCell(location.latitude, location.longitude, H3_RESOLUTION))
+            setOf(
+                h3.latLngToCell(
+                    location.latitude,
+                    location.longitude,
+                    H3_RESOLUTION,
+                ),
+            )
         }
+
         val trajectory = JSONArray()
+
         if (location.hasBearing() &&
             latestSpeedKmh >= MIN_ALERT_SPEED_KMH &&
             (!location.hasBearingAccuracy() ||
-                location.bearingAccuracyDegrees <= MAX_BEARING_ACCURACY_DEGREES)
+                location.bearingAccuracyDegrees <=
+                MAX_BEARING_ACCURACY_DEGREES)
         ) {
             latestPredictedRoute.forEach { point ->
-                trajectory.put(JSONArray().put(point.latitude).put(point.longitude))
+                trajectory.put(
+                    JSONArray()
+                        .put(point.latitude)
+                        .put(point.longitude),
+                )
             }
         }
+
         val payload = JSONObject()
             .put("latitude", location.latitude)
             .put("longitude", location.longitude)
             .put("trajectory", trajectory)
-            .put("hexagons", JSONArray().apply {
-                cells.forEach { cell ->
-                    put(JSONArray().apply {
-                        h3.cellToBoundary(cell).forEach { vertex ->
-                            put(JSONArray().put(vertex.lat).put(vertex.lng))
-                        }
-                    })
-                }
-            })
-            .put("defects", JSONArray().apply {
-                confirmedDefects.values
-                    .filter { it.h3Index in cells }
-                    .forEach { defect ->
+            .put(
+                "hexagons",
+                JSONArray().apply {
+                    cells.forEach { cell ->
                         put(
-                            JSONObject()
-                                .put("latitude", defect.latitude)
-                                .put("longitude", defect.longitude)
-                                .put("parameter", defect.parameter),
+                            JSONArray().apply {
+                                h3.cellToBoundary(cell).forEach { vertex ->
+                                    put(
+                                        JSONArray()
+                                            .put(vertex.lat)
+                                            .put(vertex.lng),
+                                    )
+                                }
+                            },
                         )
                     }
-            })
+                },
+            )
+            .put(
+                "defects",
+                JSONArray().apply {
+                    confirmedDefects.values
+                        .filter { it.h3Index in cells }
+                        .forEach { defect ->
+                            put(
+                                JSONObject()
+                                    .put("latitude", defect.latitude)
+                                    .put("longitude", defect.longitude)
+                                    .put("parameter", defect.parameter),
+                            )
+                        }
+                },
+            )
+
         return payload.toString()
     }
 
     private fun publishDriveStatus() {
         val state = when {
             syncError != null -> syncError
-            roadNetworkError != null -> roadNetworkError
-            latestPredictedRoute.size < 2 && roadFetchPending -> "Loading nearby road data"
-            latestPredictedRoute.size < 2 -> "Waiting for a GPS match to a road"
-            else -> "Driving · ${loadedCells.size} H3 cells ready"
+
+            roadNetworkError != null ->
+                "$roadNetworkError · using straight-line alerts"
+
+            latestPredictedRoute.size < 2 && roadFetchPending ->
+                "Loading road data · using straight-line alerts"
+
+            latestPredictedRoute.size < 2 ->
+                "No road match · using straight-line alerts"
+
+            else ->
+                "Driving · ${loadedCells.size} H3 cells ready"
         }
+
         publishStatus(state ?: "Waiting for a GPS match to a road")
     }
 
@@ -750,14 +1349,19 @@ class DriveMonitorService : Service() {
             this,
             0,
             Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                PendingIntent.FLAG_IMMUTABLE,
         )
+
         val stopDrive = PendingIntent.getService(
             this,
             1,
-            Intent(this, DriveMonitorService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            Intent(this, DriveMonitorService::class.java)
+                .setAction(ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                PendingIntent.FLAG_IMMUTABLE,
         )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
             .setContentTitle("vehnicate · drive monitor")
@@ -770,7 +1374,10 @@ class DriveMonitorService : Service() {
     }
 
     private fun updateNotification(message: String) {
-        if (!monitoringStarted && currentState != "Waiting for GPS") return
+        if (!monitoringStarted && currentState != "Waiting for GPS") {
+            return
+        }
+
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, buildNotification(message))
     }
@@ -781,23 +1388,33 @@ class DriveMonitorService : Service() {
             "Drive monitoring",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Ongoing GPS monitoring while a drive is active"
+            description =
+                "Ongoing GPS monitoring while a drive is active"
             setSound(null, null)
         }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+
+        getSystemService(NotificationManager::class.java)
+            .createNotificationChannel(channel)
     }
 
     override fun onDestroy() {
         if (monitoringStarted) {
             locationClient.removeLocationUpdates(locationCallback)
                 .addOnFailureListener { error ->
-                    Log.e(TAG, "Could not remove location updates", error)
+                    Log.e(
+                        TAG,
+                        "Could not remove location updates",
+                        error,
+                    )
                 }
         }
+
         releaseWakeLock()
         releaseAudioFocus()
+
         textToSpeech?.shutdown()
         networkExecutor.shutdownNow()
+
         super.onDestroy()
     }
 
@@ -807,12 +1424,19 @@ class DriveMonitorService : Service() {
         val latitude: Double,
         val longitude: Double,
         val parameter: Double,
+        val alertEligible: Boolean,
     )
 
     companion object {
-        const val ACTION_START = "com.vehnicate.roadauditor.START"
-        const val ACTION_STOP = "com.vehnicate.roadauditor.STOP"
-        const val ACTION_STATUS = "com.vehnicate.roadauditor.STATUS"
+        const val ACTION_START =
+            "com.vehnicate.roadauditor.START"
+
+        const val ACTION_STOP =
+            "com.vehnicate.roadauditor.STOP"
+
+        const val ACTION_STATUS =
+            "com.vehnicate.roadauditor.STATUS"
+
         const val EXTRA_STATE = "state"
         const val EXTRA_SPEED_KMH = "speed_kmh"
         const val EXTRA_CELL = "cell"
@@ -820,28 +1444,53 @@ class DriveMonitorService : Service() {
         const val EXTRA_MAP_DATA = "map_data"
         const val EXTRA_RUNNING = "running"
 
+        const val EXTRA_NEAREST_DEFECT_DISTANCE =
+            "nearest_defect_distance"
+
+        const val EXTRA_NEAREST_DEFECT_PARAMETER =
+            "nearest_defect_parameter"
+
         private const val TAG = "DriveMonitor"
+
         private const val DRIVE_PREFERENCES = "drive_state"
         private const val DRIVE_ACTIVE = "active"
+
         private const val CHANNEL_ID = "drive_monitor"
         private const val NOTIFICATION_ID = 9001
+
         private const val H3_RESOLUTION = 9
         private const val NEIGHBOR_RING = 1
+
         private const val LOCATION_INTERVAL_MS = 1_000L
         private const val MIN_LOCATION_INTERVAL_MS = 500L
         private const val MAX_LOCATION_AGE_NANOS = 2_000_000_000L
+
         private const val MAX_ALERT_ACCURACY_METERS = 35f
         private const val MAX_BEARING_ACCURACY_DEGREES = 30f
         private const val MIN_ALERT_SPEED_KMH = 8.0
+
         private const val PREDICTED_TRAJECTORY_METERS = 500.0
         private const val MAX_GPS_HISTORY_POINTS = 8
-        private const val ROAD_FETCH_RADIUS_METERS = 1_500
+
+        private const val ROAD_FETCH_RADIUS_METERS = 1_000
         private const val ROAD_FETCH_REFRESH_DISTANCE_METERS = 800f
         private const val ROAD_FETCH_RETRY_DELAY_MS = 30_000L
+
         private const val ROAD_ALERT_CORRIDOR_METERS = 12.0
         private const val MAX_ROAD_ALERT_CORRIDOR_METERS = 40.0
-        private const val OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-        private const val OVERPASS_USER_AGENT = "VehnicateRoadDefectAuditor/1.0"
+
+        private const val MIN_STRETCH_POINTS = 5
+        private const val MAX_STRETCH_POINT_GAP_METERS = 30.0
+
+        private val OVERPASS_URLS = listOf(
+            "https://overpass-api.de/api/interpreter",
+            "https://overpass.private.coffee/api/interpreter",
+            "https://overpass.kumi.systems/api/interpreter",
+        )
+
+        private const val OVERPASS_USER_AGENT =
+            "VehnicateRoadDefectAuditor/1.0"
+
         private val DRIVABLE_HIGHWAY_TYPES = setOf(
             "motorway",
             "trunk",
@@ -851,7 +1500,6 @@ class DriveMonitorService : Service() {
             "unclassified",
             "residential",
             "living_street",
-            "service",
             "road",
             "motorway_link",
             "trunk_link",
@@ -859,8 +1507,11 @@ class DriveMonitorService : Service() {
             "secondary_link",
             "tertiary_link",
         )
+
         private const val PAGE_SIZE = 1_000
         private const val UTTERANCE_ID = "road-defect-alert"
-        private const val MAX_WAKE_LOCK_MS = 12 * 60 * 60 * 1_000L
+
+        private const val MAX_WAKE_LOCK_MS =
+            12 * 60 * 60 * 1_000L
     }
 }

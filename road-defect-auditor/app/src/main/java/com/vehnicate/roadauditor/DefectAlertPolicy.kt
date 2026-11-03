@@ -49,8 +49,8 @@ internal object DefectAlertPolicy {
             NEAR_DISTANCE_METERS
         }
 
-    fun hasPositiveMaximumJerk(jerkValues: List<Double>): Boolean =
-        jerkValues.any { it.isFinite() && it > 0.0 }
+    fun hasMaximumJerkAtLeast(jerkValues: List<Double>): Boolean =
+        jerkValues.any { it.isFinite() && it >= 0.1 }
 
     fun distanceAheadInTravelCorridor(
         distanceMeters: Double,

@@ -4,3 +4,4 @@ backfill_jerk_values.py
 tests/
 migrations/*
 !migrations/20261022_add_session_data_processing_indexes.sql
+!migrations/20261103_speed_adjusted_hexagon_parameters.sql

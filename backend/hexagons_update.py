@@ -1,4 +1,5 @@
 import math
+import pandas as pd
 import h3 as h3lib
 from supabase import Client
 from ledger import (
@@ -8,9 +9,21 @@ from ledger import (
     ledger_illegit_penalty,
 )
 
+# If True, a same-session repeat flag (a round trip more than PASS_GAP_MS later)
+# also marks the defect as confirmed. Rewards are never paid for repeats.
+SELF_CONFIRM_ON_REPEAT = True
+
+PROXIMITY_THRESHOLD_M = 20  # metres
+PASS_GAP_MS = 60_000        # fixes near a defect >60s apart in one session = separate visits
+
+
 # ---------------------------------------------------------------------------
-# Geometry helpers.. haversine to compute the distance btw two coordinates
+# Helpers
 # ---------------------------------------------------------------------------
+
+def _to_ms(ts) -> int:
+    return int(pd.Timestamp(ts).timestamp() * 1000)
+
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6_371_000
@@ -31,9 +44,6 @@ def _weighted_centroid(
     return (lat, lon), n
 
 
-PROXIMITY_THRESHOLD_M = 20  # metres
-
-
 def _find_nearby_key(
     coord: list,
     existing: dict,
@@ -43,13 +53,13 @@ def _find_nearby_key(
     """
     A candidate row within PROXIMITY_THRESHOLD_M is only treated as the SAME
     physical road defect if direction/way information agrees. This is what
-    stops two detections <15m apart on opposite carriageways (different
+    stops two detections close together on opposite carriageways (different
     osm_way_id) or opposite lanes of an undivided street (same way, opposite
     direction_label) from being merged into one defect.
 
     If either side is missing direction/way info (an unmatched GPS fix), the
     gate is skipped for that field and the check falls back to
-    distance-only — same behavior as before map-matching existed.
+    distance-only.
     """
     lat, lon = float(coord[0]), float(coord[1])
     for key, row in existing.items():
@@ -68,49 +78,109 @@ def _find_nearby_key(
         return key
     return None
 
-def _compute_confidence(existing: dict, N: int, target_keys: set[str]) -> dict[str, float]:
-    if not target_keys:
-        return {}
-    if N == 0:
-        return {key: 0.0 for key in target_keys}
-    if N == 1:
-        # A single trip means every defect has been flagged exactly once,
-        # so none has been confirmed yet.
-        return {key: 0.0 for key in target_keys}
 
-    rd_trip_sets: list[tuple[str, set]] = [
-        (key, set(row["rd_trip_ids"] or []))
-        for key, row in existing.items()
+def _none_if_nan(x):
+    if x is None:
+        return None
+    try:
+        if math.isnan(x):
+            return None
+    except TypeError:
+        pass
+    return x
+
+
+def _norm_way(x):
+    x = _none_if_nan(x)
+    return int(x) if x is not None else None
+
+
+def _count_visits(timestamps_ms: list[int]) -> int:
+    if not timestamps_ms:
+        return 0
+    ts = sorted(timestamps_ms)
+    return 1 + sum(1 for a, b in zip(ts, ts[1:]) if b - a > PASS_GAP_MS)
+
+
+# ---------------------------------------------------------------------------
+# Pass counting / confidence
+# ---------------------------------------------------------------------------
+
+def record_trip_passes(supabase_target: Client, gps_df, run=lambda q: q.execute()) -> None:
+    """
+    For every existing defect near this trip's matched trace (20 m, same way and
+    direction when both are known), add the trip's visit count to pass_count
+    and recompute confidence. Must be called for EVERY processed trip, after
+    update_hexagons, including trips that detected nothing.
+
+    confidence = recordings (len(rd_trip_ids)) / pass_count * 100, with a 0%
+    gate while the defect has been recorded only once.
+    """
+    fixes = gps_df[[
+        "timestamp_ms", "matched_lat", "matched_lon", "osm_way_id", "direction_label",
+    ]].dropna(subset=["matched_lat", "matched_lon"])
+    if fixes.empty:
+        return
+
+    cells = {h3lib.latlng_to_cell(float(la), float(lo), 9)
+             for la, lo in zip(fixes["matched_lat"], fixes["matched_lon"])}
+    neighbor_cells: set[str] = set()
+    for c in cells:
+        neighbor_cells.update(h3lib.grid_disk(c, 1))
+    neighbor_cells = list(neighbor_cells)
+
+    defects: list[dict] = []
+    for i in range(0, len(neighbor_cells), 100):   # chunk to keep the URL short
+        resp = run(
+            supabase_target.table("hexagons")
+            .select("id, lat, lon, osm_way_id, direction_label, rd_trip_ids, pass_count, confidence")
+            .in_("h3_index", neighbor_cells[i:i + 100])
+        )
+        defects.extend(resp.data or [])
+
+    records = [
+        (int(r.timestamp_ms), float(r.matched_lat), float(r.matched_lon),
+         _norm_way(r.osm_way_id), _none_if_nan(r.direction_label))
+        for r in fixes.itertuples(index=False)
     ]
 
-    result: dict[str, float] = {}
-    for ego_key, ego_trips in rd_trip_sets:
-        if ego_key not in target_keys:
-            continue
+    for d in defects:
+        dlat, dlon = float(d["lat"]), float(d["lon"])
+        d_way, d_dir = _norm_way(d.get("osm_way_id")), d.get("direction_label")
 
-        # Flagged only once -> not confirmed yet -> confidence stays 0%.
-        if len(ego_trips) <= 1:
-            result[ego_key] = 0.0
-            continue
-
-        union_others: set = set()
-        for key, trip_set in rd_trip_sets:
-            if key == ego_key:
+        hits = []
+        for ts, la, lo, f_way, f_dir in records:
+            if abs(la - dlat) > 0.0004 or abs(lo - dlon) > 0.0004:   # cheap prefilter
                 continue
-            union_others |= trip_set
+            if _haversine_m(la, lo, dlat, dlon) >= PROXIMITY_THRESHOLD_M:
+                continue
+            if d_way and f_way and d_way != f_way:
+                continue
+            if d_dir and f_dir and d_dir != f_dir:
+                continue
+            hits.append(ts)
 
-        u_i = len(union_others)
-        if u_i == 0:
-            result[ego_key] = 0.0
+        visits = _count_visits(hits)
+        pass_count = int(d.get("pass_count") or 0) + visits
+        flags = len(d.get("rd_trip_ids") or [])
+
+        if flags <= 1 or pass_count <= 0:
+            confidence = 0.0                      # the 0% gate
+        else:
+            confidence = max(0.0, min(100.0, flags / pass_count * 100.0))
+
+        if visits == 0 and confidence == float(d.get("confidence") or 0.0):
             continue
+        run(
+            supabase_target.table("hexagons")
+            .update({"pass_count": pass_count, "confidence": confidence})
+            .eq("id", d["id"])
+        )
 
-        t_i_and_u_i = len(ego_trips & union_others)
 
-        raw = (t_i_and_u_i / u_i) * 100.0
-        result[ego_key] = max(0.0, min(100.0, raw))
-
-    return result
-
+# ---------------------------------------------------------------------------
+# Balances
+# ---------------------------------------------------------------------------
 
 def _credit_liquid_ellar(supabase_target: Client, user_id: str, amount: float) -> None:
     # Also used for debits — pass a negative amount.
@@ -158,14 +228,9 @@ def _credit_frozen_ellar(supabase_target: Client, user_id: str, amount: float) -
 
 def _get_session_multiplier(supabase_target: Client, session_id: str, default: float) -> float:
     """
-    Design doc requires that when unfreezing a discoverer's escrow (on first
-    confirmation) or penalizing them (illegitimacy check), the multiplier used
-    is the ORIGINAL discovering trip's own imu_only status — not the
+    Used only for LEGACY rows that have no stored discovery_reward. The
+    multiplier is the ORIGINAL discovering trip's own imu_only status, not the
     multiplier of whatever trip is currently being processed.
-
-    Looks this up against the `sessions` table (session_id / imu_only
-    columns, per main.py). Falls back to `default` (the current trip's
-    multiplier) if the lookup fails, so nothing hard-crashes.
     """
     try:
         resp = (
@@ -181,6 +246,10 @@ def _get_session_multiplier(supabase_target: Client, session_id: str, default: f
         print(f"  [session-lookup] failed for session_id={session_id}: {err}")
     return default
 
+
+# ---------------------------------------------------------------------------
+# Hexagon updates
+# ---------------------------------------------------------------------------
 
 def update_hexagons(supabase_target: Client, new_events: list, imu_only: bool = False) -> None:
     if not new_events:
@@ -218,7 +287,8 @@ def _process_hex_incremental(
             "id, h3_index, lat, lon, nd_count, user_id, trip_id, k, "
             "frozen_ellar_hex, liquid_ellar_hex, ellar_user, "
             "direction_label, osm_way_id, "
-            "nd, event_id, confirmed, rd_trip_ids, confidence, legit, jerk_values"
+            "nd, event_id, confirmed, rd_trip_ids, flag_ts_ms, confidence, legit, jerk_values, "
+            "discovery_n, discovery_reward"
         )
         .in_("h3_index", neighbor_cells)
         .execute()
@@ -324,12 +394,19 @@ def _process_hex_incremental(
 
             if nearby_key is not None:
                 # --------------------------------------------------------
-                # Confirmation of an existing road defect
+                # Confirmation / repeat flag of an existing road defect
                 # --------------------------------------------------------
                 row = existing[nearby_key]
 
-                if tid in (row.get("rd_trip_ids") or []):
-                    continue  # already recorded this trip against this RD
+                row_trips = row.get("rd_trip_ids") or []
+                row_ts    = row.get("flag_ts_ms") or []
+                event_ms  = _to_ms(event["start_time"])
+
+                same_session_repeat = tid in row_trips
+                if same_session_repeat:
+                    last_ms = max((t for s, t in zip(row_trips, row_ts) if s == tid), default=None)
+                    if last_ms is None or abs(event_ms - last_ms) <= PASS_GAP_MS:
+                        continue  # same visit (or a legacy row with no timestamps)
 
                 old_lat, old_lon = float(row["lat"]), float(row["lon"])
                 old_count = int(row.get("nd_count") or len(row.get("nd") or []))
@@ -340,23 +417,24 @@ def _process_hex_incremental(
 
                 prior_nd         = row.get("nd") or []
                 discoverer_uid   = prior_nd[0] if prior_nd else None
-                discoverer_trip  = (row.get("rd_trip_ids") or [None])[0]
+                discoverer_trip  = row_trips[0] if row_trips else None
                 # Unique users who've confirmed before (excludes the
                 # discoverer's own original flag).
                 prior_confirmers = set(prior_nd[1:])
                 was_legit_before = bool(row.get("legit", False))
 
-                nd_array          = prior_nd + [uid]
-                rd_trip_ids_array = (row["rd_trip_ids"] or []) + [tid]
-                eid_array         = (row["event_id"]    or []) + [eid]
+                # Repeats from the same session don't append to nd, so they
+                # can't shrink later confirmers' rewards (nD).
+                nd_array          = prior_nd if same_session_repeat else prior_nd + [uid]
+                rd_trip_ids_array = row_trips + [tid]
+                eid_array         = (row["event_id"] or []) + [eid]
+                flag_ts_array     = row_ts + [event_ms]
 
-                # Anyone re-encountering an existing RD marks it confirmed —
-                # discoverer or stranger. "legit" is reserved for a stranger.
                 is_legit_now = was_legit_before
 
                 is_discoverer   = (uid == discoverer_uid)
                 already_flagged = uid in prior_confirmers
-                eligible = (not is_discoverer) and (not already_flagged)
+                eligible = (not same_session_repeat) and (not is_discoverer) and (not already_flagged)
 
                 if eligible:
                     confirmation_count += 1
@@ -369,44 +447,63 @@ def _process_hex_incremental(
                         h3_index, row["id"], nD,
                     )
 
-                    is_legit_now = True
+                    if not was_legit_before:
+                        # First stranger confirmation: release the discoverer's
+                        # escrow. Use what was actually frozen when the defect
+                        # was created; fall back to recomputing for legacy rows.
+                        unfreeze_amt = row.get("discovery_reward")
+                        n_disc       = row.get("discovery_n")
 
-                    if not was_legit_before and discoverer_uid is not None and discoverer_trip is not None:
-                        disc_idx = trip_index_map.get(discoverer_trip)
-                        if disc_idx is not None:
-                            N_of_discoverer = disc_idx + 1
-                            disc_multiplier = _get_session_multiplier(
-                                supabase_target, discoverer_trip, default=reward_multiplier,
-                            )
-                            unfreeze_amt = disc_multiplier * (4 - 2 * math.log10(N_of_discoverer))
-                            _bump_frozen(discoverer_uid, -unfreeze_amt)
-                            _bump_liquid(discoverer_uid, unfreeze_amt)
-                            # Moves the amount from the hex's frozen pool to
-                            # its liquid pool — it's the same reward, just no
-                            # longer escrowed.
-                            frozen_ellar_hex -= unfreeze_amt
-                            liquid_ellar_hex += unfreeze_amt
-                            ledger_confirmation_unfreeze(
-                                supabase_target, discoverer_uid, unfreeze_amt,
-                                h3_index, row["id"], N_of_discoverer,
-                            )
+                        if unfreeze_amt is None and discoverer_trip is not None:
+                            disc_idx = trip_index_map.get(discoverer_trip)
+                            if disc_idx is not None:
+                                n_disc = disc_idx + 1
+                                disc_multiplier = _get_session_multiplier(
+                                    supabase_target, discoverer_trip, default=reward_multiplier,
+                                )
+                                unfreeze_amt = disc_multiplier * (4 - 2 * math.log10(n_disc))
+
+                        if discoverer_uid is None:
+                            is_legit_now = True   # nobody to unfreeze for
+                        elif unfreeze_amt is not None:
+                            unfreeze_amt = float(unfreeze_amt)
+                            if unfreeze_amt:
+                                _bump_frozen(discoverer_uid, -unfreeze_amt)
+                                _bump_liquid(discoverer_uid, unfreeze_amt)
+                                # Only this hex's pool is held in memory. For a
+                                # defect owned by a neighbouring hex, that hex's
+                                # pool is not adjusted here.
+                                if row["h3_index"] == h3_index:
+                                    frozen_ellar_hex -= unfreeze_amt
+                                    liquid_ellar_hex += unfreeze_amt
+                                ledger_confirmation_unfreeze(
+                                    supabase_target, discoverer_uid, unfreeze_amt,
+                                    row["h3_index"], row["id"], n_disc,
+                                )
+                            is_legit_now = True
                         else:
+                            # Couldn't determine the escrow: leave legit False
+                            # so the next stranger confirmation retries.
                             print(
-                                f"  [unfreeze] discoverer trip {discoverer_trip} not found in "
-                                f"hex_trip_id for h3={h3_index}, rd_id={row['id']} — skipped"
+                                f"  [unfreeze] no discovery_reward and discoverer trip "
+                                f"{discoverer_trip} not found for h3={h3_index}, "
+                                f"rd_id={row['id']} — skipped, will retry"
                             )
 
                 update_payload = {
-                    "lat":               new_lat,
-                    "lon":               new_lon,
-                    "nd_count":          new_count,
-                    "nd":                nd_array,
-                    "rd_trip_ids":       rd_trip_ids_array,
-                    "event_id":          eid_array,
-                    "confirmed":         True,
-                    "legit":             is_legit_now,
-                    "last_confirmed_at": event["start_time"],
+                    "lat":         new_lat,
+                    "lon":         new_lon,
+                    "nd_count":    new_count,
+                    "nd":          nd_array,
+                    "rd_trip_ids": rd_trip_ids_array,
+                    "event_id":    eid_array,
+                    "flag_ts_ms":  flag_ts_array,
+                    "legit":       is_legit_now,
                 }
+                if (not same_session_repeat) or SELF_CONFIRM_ON_REPEAT:
+                    update_payload["confirmed"] = True
+                    update_payload["last_confirmed_at"] = event["start_time"]
+
                 jerk_mps3 = event.get("jerk_mps3")
                 if jerk_mps3 is not None and math.isfinite(float(jerk_mps3)):
                     update_payload["jerk_values"] = (
@@ -454,11 +551,14 @@ def _process_hex_incremental(
                     "nd":          [uid],
                     "rd_trip_ids": [tid],
                     "event_id":    [eid],
+                    "flag_ts_ms":  [_to_ms(event["start_time"])],
                     "confirmed":   False,
                     "legit":       False,
                     "jerk_values": [],
                     "direction_label": event_direction,
                     "osm_way_id":      event_way_id,
+                    "discovery_n":      N,
+                    "discovery_reward": discovery_reward,
                 }
                 insert_resp = supabase_target.table("hexagons").insert(new_row).execute()
 
@@ -478,7 +578,7 @@ def _process_hex_incremental(
                     h3_index, cached.get("id"), N, cur_k,
                 )
 
-    # Check whether the trip discovering 5 trips ago earned legitimacy for
+    # Check whether the trip discovering 10 trips ago earned legitimacy for
     # what it found, before writing final balances.
     total_trips = len(hex_trip_id)
     if total_trips > 10:
@@ -503,10 +603,7 @@ def _process_hex_incremental(
         _credit_liquid_ellar(supabase_target, uid, amount)
 
     # --- Persist hex-level summary fields on every remaining row ----------
-    N_total        = len(hex_trip_id)
-    all_keys       = set(existing_same_hex.keys())
-    confidence_map = _compute_confidence(existing_same_hex, N_total, all_keys)
-
+    # (confidence and pass_count are maintained by record_trip_passes)
     for key, row in existing_same_hex.items():
         row_id = row.get("id")
         if row_id is None:
@@ -515,7 +612,6 @@ def _process_hex_incremental(
             "frozen_ellar_hex": frozen_ellar_hex,
             "liquid_ellar_hex": liquid_ellar_hex,
             "ellar_user":       ellar_user_hex,
-            "confidence":       confidence_map.get(key, 0.0),
             "user_id":          hex_user_id,
             "trip_id":          hex_trip_id,
             "k":                hex_k,
@@ -541,10 +637,10 @@ def _check_illegit_defects(
 ) -> float:
     """
     10 trips after a given trip discovered road defects in this hex, check
-    whether each of those defects earned legitimacy (confirmed==True, by
-    discoverer or stranger, or confidence >= 30). Anything that didn't is
-    discarded, and its discoverer is penalized: the original frozen discovery
-    reward for that RD is removed entirely (no liquid-side penalty).
+    whether each of those defects earned legitimacy (confirmed==True, or
+    confidence >= 30). Anything that didn't is discarded, and its discoverer
+    is penalized: the original frozen discovery reward for that RD is removed
+    entirely (no liquid-side penalty).
 
     Returns the total frozen amount clawed back across all discarded rDs, so
     the caller can also subtract it from the hexagon's running frozen pool.
@@ -553,8 +649,8 @@ def _check_illegit_defects(
         return 0.0
 
     examined_trip_id = hex_trip_id[trip_index]
-    examined_user     = hex_user_id[trip_index]
-    N_of_discoverer   = trip_index + 1
+    examined_user    = hex_user_id[trip_index]
+    fallback_N       = trip_index + 1
 
     rds_in_trip: list[tuple[str, dict]] = []
     for key, row in existing_same_hex.items():
@@ -565,9 +661,7 @@ def _check_illegit_defects(
     if not rds_in_trip:
         return 0.0
 
-    disc_multiplier = _get_session_multiplier(
-        supabase_target, examined_trip_id, default=reward_multiplier,
-    )
+    disc_multiplier = None   # looked up lazily, only for legacy rows
 
     discard = []
     total_frozen_penalty = 0.0
@@ -578,19 +672,29 @@ def _check_illegit_defects(
         if confirmed or confidence >= 30.0:
             continue  # legit enough — no action
 
-        penalty_frozen = disc_multiplier * (4 - 2 * math.log10(N_of_discoverer))
+        # Claw back exactly what was frozen for this defect.
+        stored_reward = row.get("discovery_reward")
+        n_disc        = row.get("discovery_n") or fallback_N
+        if stored_reward is not None:
+            penalty_frozen = float(stored_reward)
+        else:
+            if disc_multiplier is None:
+                disc_multiplier = _get_session_multiplier(
+                    supabase_target, examined_trip_id, default=reward_multiplier,
+                )
+            penalty_frozen = disc_multiplier * (4 - 2 * math.log10(n_disc))
 
         frozen_delta[examined_user] = frozen_delta.get(examined_user, 0.0) - penalty_frozen
         total_frozen_penalty += penalty_frozen
 
         ledger_illegit_penalty(
             supabase_target, examined_user, penalty_frozen,
-            h3_index, row.get("id"), N_of_discoverer,
+            h3_index, row.get("id"), n_disc,
         )
 
         discard.append((key, row.get("id")))
         print(
-            f"  [illegit] trip={examined_trip_id} n={N_of_discoverer} "
+            f"  [illegit] trip={examined_trip_id} n={n_disc} "
             f"rd_id={row.get('id')} frozen_penalty={penalty_frozen:.4f} "
             f"user={examined_user}"
         )
