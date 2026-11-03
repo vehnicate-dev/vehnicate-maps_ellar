@@ -172,6 +172,11 @@ _SUPABASE_CLIENT_OPTIONS = ClientOptions(
 def _make_supabase_client(url: str, key: str):
     return create_client(url, key, options=_SUPABASE_CLIENT_OPTIONS)
 
+
+def _is_test_mode() -> bool:
+    return SOURCE_KEY != TARGET_KEY or SOURCE_URL != TARGET_URL
+
+
 def _record_passes_safe(supabase_target, gps_df) -> None:
     try:
         record_trip_passes(supabase_target, gps_df, run=_execute_with_retry)
@@ -665,6 +670,7 @@ def _update_imu_only(
     gps_df: pd.DataFrame,
     imu_df: pd.DataFrame,
     current_imu_only: bool,
+    persist: bool = True,
 ) -> bool:
     """Runs every time process_trip is invoked, independent of aliv_processed,
     so it can be iterated on/tested against sessions already processed by Aliv.
@@ -679,7 +685,8 @@ def _update_imu_only(
 
     Returns the resolved imu_only value (freshly written value, or
     current_imu_only if left untouched / write failed) so the caller can pass
-    a single authoritative value down to update_hexagons/ledger.
+    a single authoritative value down to update_hexagons/ledger. When persist
+    is false, it computes the value without changing the source session.
     """
     mount_yaw_deg, signal_energy = estimate_mount_yaw_offset(gps_df, imu_df)
     print(f"[process_trip] mount yaw offset: {mount_yaw_deg:.1f}deg (energy={signal_energy:.1f})")
@@ -689,6 +696,10 @@ def _update_imu_only(
         return current_imu_only
 
     imu_only_value = abs(mount_yaw_deg) > ANGLE_THRESHOLD_DEG
+    if not persist:
+        print(f"[process_trip] test mode: computed imu_only={imu_only_value} without updating source session.")
+        return imu_only_value
+
     try:
         _execute_with_retry(
             supabase_source.table("sessions")
@@ -719,13 +730,16 @@ def process_trip(session_id: str, vehicle_id: int, user_id: str, start_time: str
 
 
 def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_time: str, end_time: str):
+    test_mode = _is_test_mode()
     supabase_source = _make_supabase_client(SOURCE_URL, SOURCE_KEY)
     supabase_target = _make_supabase_client(TARGET_URL, TARGET_KEY)
+    if test_mode:
+        print("[process_trip] source and target differ; running without source or Ellar side effects.")
 
     flags = _get_session_flags(supabase_source, session_id)
     already_processed = bool(flags.get("aliv_processed"))
     current_imu_only = bool(flags.get("imu_only", True))  # fail-closed default, matches DB default
-    if already_processed:
+    if already_processed and not test_mode:
         print(f"[process_trip] session {session_id} already aliv_processed — will still re-check imu_only, will skip Aliv/hexagons/distance.")
     # ── 1. Fetch IMU data ──────────────────────────────────────────────────────
     if not SOURCE_DATABASE_URL:
@@ -751,9 +765,9 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
         return
 
     if len(gps_rows) < MIN_GPS_POINTS:
-        print(f"[process_trip] Only {len(gps_rows)} GPS points (< {MIN_GPS_POINTS}), "
-            f"marking aliv_processed and skipping map-matching/Aliv.")
-        _mark_aliv_processed(supabase_source, session_id)
+        print(f"[process_trip] Only {len(gps_rows)} GPS points (< {MIN_GPS_POINTS}), skipping map-matching/Aliv.")
+        if not test_mode:
+            _mark_aliv_processed(supabase_source, session_id)
         return
 
     gps_df = pd.DataFrame(gps_rows)
@@ -773,24 +787,32 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     imu_df["created_at"] = pd.to_datetime(imu_df["created_at"], utc=True, errors="coerce")
     fs = estimate_fs(imu_df, time_col="timestamp_ms")
 
-    imu_only = _update_imu_only(supabase_source, session_id, gps_df, imu_df, current_imu_only)
+    imu_only = _update_imu_only(
+        supabase_source,
+        session_id,
+        gps_df,
+        imu_df,
+        current_imu_only,
+        persist=not test_mode,
+    )
 
-    if already_processed:
+    if already_processed and not test_mode:
         print("[process_trip] Finished (imu_only re-check only).")
         return
 
     if total_distance_m < MIN_TRIP_DISTANCE_M:
         print(f"[process_trip] Trip moved only {total_distance_m:.2f}m "
-            f"(< {MIN_TRIP_DISTANCE_M}m), marking aliv_processed and skipping map-matching/Aliv.")
-        try:
-            _execute_with_retry(
-                supabase_source.table("sessions")
-                .update({"distance": total_distance_m / 1000})
-                .eq("session_id", session_id)
-            )
-        except Exception as dist_err:
-            print(f"[process_trip] distance update failed: {dist_err}")
-        _mark_aliv_processed(supabase_source, session_id)
+            f"(< {MIN_TRIP_DISTANCE_M}m), skipping map-matching/Aliv.")
+        if not test_mode:
+            try:
+                _execute_with_retry(
+                    supabase_source.table("sessions")
+                    .update({"distance": total_distance_m / 1000})
+                    .eq("session_id", session_id)
+                )
+            except Exception as dist_err:
+                print(f"[process_trip] distance update failed: {dist_err}")
+            _mark_aliv_processed(supabase_source, session_id)
         return
 
     # ── 3a. Map-match GPS onto OSM and persist the matched trajectory ──────────
@@ -803,60 +825,64 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     matched_records = [sanitize_for_json(r) for r in matched_records]
     for r in matched_records:
         r["session_id"] = session_id
-    try:
-        _execute_with_retry(
-            supabase_source.table("matched_gps_data").insert(matched_records)
-        )
-    except Exception as match_err:
-        print(f"[process_trip] matched_gps_data insert failed: {match_err}")
+    if not test_mode:
+        try:
+            _execute_with_retry(
+                supabase_source.table("matched_gps_data").insert(matched_records)
+            )
+        except Exception as match_err:
+            print(f"[process_trip] matched_gps_data insert failed: {match_err}")
 
     df = merge_gps_into_imu(imu_df, gps_df)
     timesent_T0 = pd.to_datetime(df["timestamp_ms"].iloc[0], unit="ms", utc=True)
 
     # ── 3b. Update sessions.distance ────────────────────────────────────────
-    try:
-        _execute_with_retry(
-            supabase_source.table("sessions")
-            .update({"distance": total_distance_m / 1000})
-            .eq("session_id", session_id)
-        )
-    except Exception as dist_err:
-        print(f"[process_trip] distance update failed: {dist_err}")
+    if not test_mode:
+        try:
+            _execute_with_retry(
+                supabase_source.table("sessions")
+                .update({"distance": total_distance_m / 1000})
+                .eq("session_id", session_id)
+            )
+        except Exception as dist_err:
+            print(f"[process_trip] distance update failed: {dist_err}")
 
     # ── 3c-geo. Record which geographies this trip covered ──────────────────
-    try:
-        add_session_geographies(
-            supabase_target,
-            user_id,
-            zip(gps_df["latitude"], gps_df["longitude"]),   # raw fixes, still present after map matching
-            run=_execute_with_retry,
-        )
-    except Exception as geo_err:
-        print(f"[process_trip] geographies update failed: {geo_err!r}")   # never fail the trip over this
+    if not test_mode:
+        try:
+            add_session_geographies(
+                supabase_target,
+                user_id,
+                zip(gps_df["latitude"], gps_df["longitude"]),   # raw fixes, still present after map matching
+                run=_execute_with_retry,
+            )
+        except Exception as geo_err:
+            print(f"[process_trip] geographies update failed: {geo_err!r}")   # never fail the trip over this
 
     # ── 3d. Increment cumulative distance in user_details ──────────────────────
-    try:
-        resp = _execute_with_retry(
-            supabase_target
-            .table("user_details")
-            .select("distance")
-            .eq("firebaseuid", user_id)
-        )
-        if resp.data:
-            current_distance = float(resp.data[0]["distance"] or 0.0)
-            new_distance = current_distance + (total_distance_m/1000)
-            _execute_with_retry(
-                supabase_target.table("user_details")
-                .update({"distance": new_distance})
+    if not test_mode:
+        try:
+            resp = _execute_with_retry(
+                supabase_target
+                .table("user_details")
+                .select("distance")
                 .eq("firebaseuid", user_id)
             )
-        else:
-            _execute_with_retry(
-                supabase_target.table("user_details")
-                .insert({"firebaseuid": user_id, "distance": total_distance_m/1000})
-            )
-    except Exception as user_dist_err:
-        print(f"[process_trip] user_details distance update failed: {user_dist_err}")
+            if resp.data:
+                current_distance = float(resp.data[0]["distance"] or 0.0)
+                new_distance = current_distance + (total_distance_m/1000)
+                _execute_with_retry(
+                    supabase_target.table("user_details")
+                    .update({"distance": new_distance})
+                    .eq("firebaseuid", user_id)
+                )
+            else:
+                _execute_with_retry(
+                    supabase_target.table("user_details")
+                    .insert({"firebaseuid": user_id, "distance": total_distance_m/1000})
+                )
+        except Exception as user_dist_err:
+            print(f"[process_trip] user_details distance update failed: {user_dist_err}")
 
     # ── 4. Run Aliv ──────────────
     aliv_input = build_aliv_input(df)
@@ -867,7 +893,8 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     if not result.get("speedbreakers"):
         print("[process_trip] No events detected.")
         _record_passes_safe(supabase_target, pass_df)      # NEW
-        _mark_aliv_processed(supabase_source, session_id)
+        if not test_mode:
+            _mark_aliv_processed(supabase_source, session_id)
         return
     aliv_trim_offset = 0 #50 * (1000 / fs)
 
@@ -878,7 +905,8 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
     print(f"[process_trip] Enriched events: {len(enriched_events)}")
     if not enriched_events:
         _record_passes_safe(supabase_target, pass_df)
-        _mark_aliv_processed(supabase_source, session_id)
+        if not test_mode:
+            _mark_aliv_processed(supabase_source, session_id)
         return
 
     enriched_events = [sanitize_for_json(e) for e in enriched_events]
@@ -909,12 +937,13 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
 
     # ── 7. Update hexagons ─────────────────────────────────────────────────────
     try:
-        update_hexagons(supabase_target, inserted_events, imu_only)
+        update_hexagons(supabase_target, inserted_events, imu_only, test_mode=test_mode)
     except Exception as hex_err:
         print(f"[hexagons] update failed: {hex_err}")
 
     _record_passes_safe(supabase_target, pass_df)
-    _mark_aliv_processed(supabase_source, session_id)
+    if not test_mode:
+        _mark_aliv_processed(supabase_source, session_id)
     print("[process_trip] Finished.")
 
 
@@ -984,10 +1013,12 @@ def get_public_ellar_totals():
 
 
 # ── Full-pipeline replay ─────────────────────────────────────────────────────
-# Wipes hexagons/imu_events/ledger + user_details balances, then reprocesses
-# every existing session strictly in order of end_time (oldest trip first —
-# the trip that finished first gets discovery rights, matching the original
-# chronological order the reward/confidence logic assumes). Calls
+# Reprocesses every existing session strictly in order of end_time (oldest trip
+# first — the trip that finished first gets discovery rights, matching the
+# original chronological order the reward/confidence logic assumes). With
+# identical source/target credentials, this resets the full pipeline. With
+# different source/target credentials, it clears only target hexagons/events
+# and suppresses source writes and Ellar side effects. Calls
 # _process_trip_inner() directly in-process rather than round-tripping
 # through the webhook: since it's a normal (non-background) function call
 # inside this loop, by the time it returns the session's aliv_processed flag
@@ -995,15 +1026,29 @@ def get_public_ellar_totals():
 # webhook, no created_at trick, no polling needed.
 
 def _replay_all_sessions_inner():
+    test_mode = _is_test_mode()
     supabase_source = _make_supabase_client(SOURCE_URL, SOURCE_KEY)
     supabase_target = _make_supabase_client(TARGET_URL, TARGET_KEY)
 
-    print("[replay] resetting hexagons/imu_events/ledger + user_details balances")
-    try:
-        _execute_with_retry(supabase_target.rpc("reset_pipeline", {}))
-    except Exception as err:
-        print(f"[replay] reset_pipeline failed, aborting replay: {err!r}")
-        return
+    if test_mode:
+        print("[replay] test mode: clearing only target hexagons and imu_events.")
+        try:
+            _execute_with_retry(
+                supabase_target.table("hexagons").delete().not_.is_("id", "null")
+            )
+            _execute_with_retry(
+                supabase_target.table("imu_events").delete().not_.is_("imu_events_id", "null")
+            )
+        except Exception as err:
+            print(f"[replay] failed to clear target test outputs, aborting replay: {err!r}")
+            return
+    else:
+        print("[replay] resetting hexagons/imu_events/ledger + user_details balances")
+        try:
+            _execute_with_retry(supabase_target.rpc("reset_pipeline", {}))
+        except Exception as err:
+            print(f"[replay] reset_pipeline failed, aborting replay: {err!r}")
+            return
 
     sessions = fetch_all_pages(
         supabase_source,
@@ -1018,15 +1063,16 @@ def _replay_all_sessions_inner():
         session_id = session["session_id"]
         print(f"[replay] ({i + 1}/{len(sessions)}) session={session_id} end_time={session['end_time']}")
 
-        try:
-            _execute_with_retry(
-                supabase_source.table("sessions")
-                .update({"distance": 0, "aliv_processed": False, "imu_only": True})
-                .eq("session_id", session_id)
-            )
-        except Exception as reset_err:
-            print(f"[replay] failed to reset session {session_id}, skipping: {reset_err!r}")
-            continue
+        if not test_mode:
+            try:
+                _execute_with_retry(
+                    supabase_source.table("sessions")
+                    .update({"distance": 0, "aliv_processed": False, "imu_only": True})
+                    .eq("session_id", session_id)
+                )
+            except Exception as reset_err:
+                print(f"[replay] failed to reset session {session_id}, skipping: {reset_err!r}")
+                continue
 
         try:
             _process_trip_inner(

@@ -251,7 +251,12 @@ def _get_session_multiplier(supabase_target: Client, session_id: str, default: f
 # Hexagon updates
 # ---------------------------------------------------------------------------
 
-def update_hexagons(supabase_target: Client, new_events: list, imu_only: bool = False) -> None:
+def update_hexagons(
+    supabase_target: Client,
+    new_events: list,
+    imu_only: bool = False,
+    test_mode: bool = False,
+) -> None:
     if not new_events:
         return
 
@@ -262,7 +267,9 @@ def update_hexagons(supabase_target: Client, new_events: list, imu_only: bool = 
         by_hex.setdefault(event["h3_index"], []).append(event)
 
     for h3_index, events in by_hex.items():
-        _process_hex_incremental(supabase_target, h3_index, events, imu_only)
+        _process_hex_incremental(
+            supabase_target, h3_index, events, imu_only, test_mode=test_mode
+        )
 
     supabase_target.rpc("refresh_hexagon_parameters", {}).execute()
 
@@ -272,8 +279,9 @@ def _process_hex_incremental(
     h3_index: str,
     new_events: list,
     imu_only: bool = False,
+    test_mode: bool = False,
 ) -> None:
-    reward_multiplier = 0.5 if imu_only else 1.0
+    reward_multiplier = 0.0 if test_mode else (0.5 if imu_only else 1.0)
 
     # Fetch rows from this hex AND its immediate ring-1 neighbors, so points
     # near a cell boundary can still be matched against nearby points that
@@ -436,7 +444,7 @@ def _process_hex_incremental(
                 already_flagged = uid in prior_confirmers
                 eligible = (not same_session_repeat) and (not is_discoverer) and (not already_flagged)
 
-                if eligible:
+                if eligible and not test_mode:
                     confirmation_count += 1
                     nD = len(prior_confirmers) + 1
                     confirmation_reward = reward_multiplier * (2 - math.log10(nD))
@@ -533,7 +541,9 @@ def _process_hex_incremental(
                 # --------------------------------------------------------
                 discovery_count += 1
 
-                if N <= 99:
+                if test_mode:
+                    discovery_reward = 0.0
+                elif N <= 99:
                     discovery_reward = reward_multiplier * (4 - 2 * math.log10(N))
                 else:
                     discovery_reward = (
@@ -573,15 +583,16 @@ def _process_hex_incremental(
                 if trip_idx is not None:
                     ellar_user_hex[trip_idx] += discovery_reward
 
-                ledger_discovery_frozen(
-                    supabase_target, uid, discovery_reward,
-                    h3_index, cached.get("id"), N, cur_k,
-                )
+                if not test_mode:
+                    ledger_discovery_frozen(
+                        supabase_target, uid, discovery_reward,
+                        h3_index, cached.get("id"), N, cur_k,
+                    )
 
     # Check whether the trip discovering 10 trips ago earned legitimacy for
     # what it found, before writing final balances.
     total_trips = len(hex_trip_id)
-    if total_trips > 10:
+    if total_trips > 10 and not test_mode:
         total_frozen_penalty = _check_illegit_defects(
             supabase_target,
             existing_same_hex,
@@ -597,10 +608,11 @@ def _process_hex_incremental(
         frozen_ellar_hex -= total_frozen_penalty
 
     # --- Apply accumulated balance deltas ----------------------------------
-    for uid, amount in frozen_delta.items():
-        _credit_frozen_ellar(supabase_target, uid, amount)
-    for uid, amount in liquid_delta.items():
-        _credit_liquid_ellar(supabase_target, uid, amount)
+    if not test_mode:
+        for uid, amount in frozen_delta.items():
+            _credit_frozen_ellar(supabase_target, uid, amount)
+        for uid, amount in liquid_delta.items():
+            _credit_liquid_ellar(supabase_target, uid, amount)
 
     # --- Persist hex-level summary fields on every remaining row ----------
     # (confidence and pass_count are maintained by record_trip_passes)
@@ -608,14 +620,18 @@ def _process_hex_incremental(
         row_id = row.get("id")
         if row_id is None:
             continue
-        supabase_target.table("hexagons").update({
-            "frozen_ellar_hex": frozen_ellar_hex,
-            "liquid_ellar_hex": liquid_ellar_hex,
-            "ellar_user":       ellar_user_hex,
+        summary_payload = {
             "user_id":          hex_user_id,
             "trip_id":          hex_trip_id,
             "k":                hex_k,
-        }).eq("id", row_id).execute()
+        }
+        if not test_mode:
+            summary_payload.update({
+                "frozen_ellar_hex": frozen_ellar_hex,
+                "liquid_ellar_hex": liquid_ellar_hex,
+                "ellar_user":       ellar_user_hex,
+            })
+        supabase_target.table("hexagons").update(summary_payload).eq("id", row_id).execute()
 
     print(
         f"[hexagons] h3={h3_index} | trips={len(sorted_trips)} | "
