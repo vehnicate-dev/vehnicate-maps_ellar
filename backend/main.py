@@ -567,19 +567,18 @@ def _ensure_test_target_user(supabase_source, supabase_target, user_id: str) -> 
 
     source_user = _execute_with_retry(
         supabase_source.table("user_details")
-        .select("firebaseuid")
+        .select("*")
         .eq("firebaseuid", user_id)
         .limit(1)
     )
     if not source_user.data:
         raise ValueError(f"Source user_details row for {user_id} was not found.")
 
+    target_user_data = dict(source_user.data[0])
+    target_user_data["frozen_ellar"] = 0.0
+    target_user_data["liquid_ellar"] = 0.0
     _execute_with_retry(
-        supabase_target.table("user_details").insert({
-            "firebaseuid": user_id,
-            "frozen_ellar": 0.0,
-            "liquid_ellar": 0.0,
-        })
+        supabase_target.table("user_details").insert(target_user_data)
     )
 
 
