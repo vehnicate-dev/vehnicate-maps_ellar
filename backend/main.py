@@ -555,6 +555,34 @@ def _get_session_flags(supabase_source, session_id: str) -> dict:
     return resp.data[0] if resp.data else {}
 
 
+def _ensure_test_target_user(supabase_source, supabase_target, user_id: str) -> None:
+    target_user = _execute_with_retry(
+        supabase_target.table("user_details")
+        .select("firebaseuid")
+        .eq("firebaseuid", user_id)
+        .limit(1)
+    )
+    if target_user.data:
+        return
+
+    source_user = _execute_with_retry(
+        supabase_source.table("user_details")
+        .select("firebaseuid")
+        .eq("firebaseuid", user_id)
+        .limit(1)
+    )
+    if not source_user.data:
+        raise ValueError(f"Source user_details row for {user_id} was not found.")
+
+    _execute_with_retry(
+        supabase_target.table("user_details").insert({
+            "firebaseuid": user_id,
+            "frozen_ellar": 0.0,
+            "liquid_ellar": 0.0,
+        })
+    )
+
+
 def _ensure_test_target_session(supabase_source, supabase_target, session_id: str) -> None:
     target_session = _execute_with_retry(
         supabase_target.table("sessions")
@@ -577,6 +605,11 @@ def _ensure_test_target_session(supabase_source, supabase_target, session_id: st
     if not source_session.data:
         raise ValueError(f"Source session {session_id} was not found for target event insertion.")
 
+    _ensure_test_target_user(
+        supabase_source,
+        supabase_target,
+        source_session.data[0]["user_id"],
+    )
     _execute_with_retry(
         supabase_target.table("sessions").insert(source_session.data[0])
     )
