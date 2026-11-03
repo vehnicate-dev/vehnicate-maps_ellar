@@ -554,6 +554,34 @@ def _get_session_flags(supabase_source, session_id: str) -> dict:
     )
     return resp.data[0] if resp.data else {}
 
+
+def _ensure_test_target_session(supabase_source, supabase_target, session_id: str) -> None:
+    target_session = _execute_with_retry(
+        supabase_target.table("sessions")
+        .select("session_id")
+        .eq("session_id", session_id)
+        .limit(1)
+    )
+    if target_session.data:
+        return
+
+    source_session = _execute_with_retry(
+        supabase_source.table("sessions")
+        .select(
+            "session_id, user_id, vehicle_id, start_time, end_time, "
+            "status, distance, created_at"
+        )
+        .eq("session_id", session_id)
+        .limit(1)
+    )
+    if not source_session.data:
+        raise ValueError(f"Source session {session_id} was not found for target event insertion.")
+
+    _execute_with_retry(
+        supabase_target.table("sessions").insert(source_session.data[0])
+    )
+
+
 def _mark_aliv_processed(supabase_source, session_id: str) -> None:
     try:
         _execute_with_retry(
@@ -923,6 +951,9 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
         }
         for e in enriched_events
     ]
+    if test_mode:
+        _ensure_test_target_session(supabase_source, supabase_target, session_id)
+
     insert_response = _execute_with_retry(
         supabase_target.table("imu_events").insert(events_for_db)
     )
@@ -964,6 +995,10 @@ async def add_security_headers(request, call_next):
 
 @app.post("/Aliv_for_MVP1")
 def Aliv_for_MVP1(payload: WebhookPayload):
+    if _is_test_mode():
+        print("[webhook] ignoring session insert while source/target test mode is enabled.")
+        return {"status": "ignored in test mode"}
+
     session = payload.record
     _trip_queue.put((
         session.session_id,
