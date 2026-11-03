@@ -582,6 +582,40 @@ def _ensure_test_target_user(supabase_source, supabase_target, user_id: str) -> 
     )
 
 
+def _ensure_test_target_vehicle(
+    supabase_source,
+    supabase_target,
+    vehicle_id: int,
+    user_id: str,
+) -> None:
+    target_vehicle = _execute_with_retry(
+        supabase_target.table("vehicle_details")
+        .select("vehicle_id")
+        .eq("vehicle_id", vehicle_id)
+        .limit(1)
+    )
+    if target_vehicle.data:
+        return
+
+    source_vehicle = _execute_with_retry(
+        supabase_source.table("vehicle_details")
+        .select("*")
+        .eq("vehicle_id", vehicle_id)
+        .limit(1)
+    )
+    if not source_vehicle.data:
+        raise ValueError(f"Source vehicle_details row for {vehicle_id} was not found.")
+
+    vehicle_data = dict(source_vehicle.data[0])
+    for owner_column in ("user_id", "firebaseuid"):
+        if owner_column in vehicle_data:
+            vehicle_data[owner_column] = user_id
+
+    _execute_with_retry(
+        supabase_target.table("vehicle_details").insert(vehicle_data)
+    )
+
+
 def _ensure_test_target_session(supabase_source, supabase_target, session_id: str) -> None:
     target_session = _execute_with_retry(
         supabase_target.table("sessions")
@@ -604,11 +638,10 @@ def _ensure_test_target_session(supabase_source, supabase_target, session_id: st
     if not source_session.data:
         raise ValueError(f"Source session {session_id} was not found for target event insertion.")
 
-    _ensure_test_target_user(
-        supabase_source,
-        supabase_target,
-        source_session.data[0]["user_id"],
-    )
+    user_id = source_session.data[0]["user_id"]
+    vehicle_id = source_session.data[0]["vehicle_id"]
+    _ensure_test_target_user(supabase_source, supabase_target, user_id)
+    _ensure_test_target_vehicle(supabase_source, supabase_target, vehicle_id, user_id)
     _execute_with_retry(
         supabase_target.table("sessions").insert(source_session.data[0])
     )
