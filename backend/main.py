@@ -619,6 +619,7 @@ def _ensure_test_target_vehicle(
         if matching_vehicle.data:
             return int(matching_vehicle.data[0]["vehicleid"])
 
+    # Test targets may enforce a different vehicle_type CHECK constraint.
     vehicle_data = {
         column: source_vehicle_data[column]
         for column in (
@@ -627,7 +628,6 @@ def _ensure_test_target_vehicle(
             "registration",
             "puc",
             "model",
-            "vehicle_type",
             "average_mileage",
         )
         if column in source_vehicle_data
