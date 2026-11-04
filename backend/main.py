@@ -1070,6 +1070,7 @@ def _process_trip_inner(session_id: str, vehicle_id: int, user_id: str, start_ti
         update_hexagons(supabase_target, inserted_events, imu_only, test_mode=test_mode)
     except Exception as hex_err:
         print(f"[hexagons] update failed: {hex_err}")
+        raise
 
     _record_passes_safe(supabase_target, pass_df)
     if not test_mode:
@@ -1180,8 +1181,13 @@ def _replay_all_sessions_inner():
         print("[replay] resetting hexagons/imu_events/ledger + user_details balances")
         try:
             _execute_with_retry(supabase_target.rpc("reset_pipeline", {}))
+            _execute_with_retry(
+                supabase_target.table("sessions")
+                .update({"liquid_ellar": 0, "frozen_ellar": 0})
+                .not_.is_("session_id", "null")
+            )
         except Exception as err:
-            print(f"[replay] reset_pipeline failed, aborting replay: {err!r}")
+            print(f"[replay] pipeline/session Ellar reset failed, aborting replay: {err!r}")
             return
 
     sessions = fetch_all_pages(

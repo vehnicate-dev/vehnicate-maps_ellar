@@ -465,17 +465,17 @@ function pickImageEligibleEventId(eventIds, sessionInfoMap) {
 // Fallback lookup used only when a row has no last_confirmed_at (e.g. a
 // point with a single detection, where the backend's "new point" insert
 // path doesn't stamp last_confirmed_at).
-async function fetchEventTimestamp(eid) {
+async function fetchEventDetails(eid) {
   const { data, error } = await supabase
     .from("imu_events")
-    .select("start_time")
+    .select("start_time, median_speed_mps")
     .eq("imu_events_id", eid)
     .maybeSingle();
-  if (error) { console.error("[supabase] event timestamp:", error); return null; }
-  return data?.start_time || null;
+  if (error) { console.error("[supabase] event details:", error); return null; }
+  return data || null;
 }
 
-async function fetchEventsForCells(cells, cachedCells) {
+async function fetchEventsForCells(cells, cachedCells, minConfidencePct) {
   const toFetch = cells.filter((c) => !cachedCells.has(c));
   if (!toFetch.length) return [];
 
@@ -487,10 +487,16 @@ async function fetchEventsForCells(cells, cachedCells) {
 
   const results = await Promise.all(
     chunks.map(async (chunk) => {
-      const { data, error } = await supabase
+      let query = supabase
         .from("hexagons")
         .select("h3_index, lat, lon, parameter, event_id, confidence, last_confirmed_at, jerk_values")
         .in("h3_index", chunk);
+      if (minConfidencePct > 0) {
+        query = query.or(
+          `confidence.gte.${minConfidencePct},and(confidence.gte.${minConfidencePct / 100},confidence.lte.1)`,
+        );
+      }
+      const { data, error } = await query;
       if (error) { console.error("[supabase] roaddefects:", error); return []; }
       return data || [];
     })
@@ -705,13 +711,16 @@ async function buildImagePopupHTML(row, param, frames, rotation = 0, opts = {}) 
   return html;
 }
 
-function buildHoverHTML(row, param, lastDetectedStr) {
+function buildHoverHTML(row, param, lastDetectedStr, medianSpeedMps) {
   const color = getEventColor(param);
   const jerkValues = Array.isArray(row.jerk_values)
     ? row.jerk_values.map(Number).filter(Number.isFinite)
     : [];
   const maximumJerk = jerkValues.length
     ? Math.max(...jerkValues).toFixed(5)
+    : "—";
+  const medianSpeedKmph = medianSpeedMps != null && Number.isFinite(Number(medianSpeedMps))
+    ? (Number(medianSpeedMps) * 3.6).toFixed(2)
     : "—";
 
   return `
@@ -733,8 +742,13 @@ function buildHoverHTML(row, param, lastDetectedStr) {
       </div>
 
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-        <span style="color:#ccc;font-weight:600;">Parameter</span>
+        <span style="color:#ccc;font-weight:600;">Intensity</span>
         <span style="font-weight:700;color:${color};">${param.toFixed(3)}</span>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <span style="color:#ccc;font-weight:600;">Median speed (kmph)</span>
+        <span style="color:#fff;">${medianSpeedKmph}</span>
       </div>
 
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
@@ -1732,7 +1746,7 @@ export default function RoadDefectsMap() {
   const markersByEidRef  = useRef({});
   const rotationCacheRef = useRef({});
   const imageEligibilityCacheRef = useRef({}); // rowKey -> eligible eid (or null)
-  const lastDetectedTsCacheRef   = useRef({}); // eid -> formatted IST string
+  const eventDetailsCacheRef = useRef({}); // eid -> start_time and median_speed_mps
   const fetchedCells  = useRef(new Set());
   const isFetchingRef = useRef(false);
   const searchPinRef  = useRef(null);
@@ -1909,13 +1923,14 @@ export default function RoadDefectsMap() {
 
   // ── Confidence filter (0–100%) ─────────────────────────────────────────────
   const [minConfidence, setMinConfidence] = useState(0);
+  const minConfidenceRef = useRef(minConfidence);
 
   // ── Last detected badge ────────────────────────────────────────────────────
   const [lastDetected, setLastDetected] = useState(null);
   const lastDetectedKeyRef = useRef(null);
 
   // ── Apply confidence filter to all cached layers ───────────────────────────
-  // confidence is stored as 0–1 float in the hexagons row; threshold is 0–100 int.
+  // Confidence may be stored as a fraction or a percentage in existing rows.
   const applyConfidenceFilter = useCallback((thresholdPct) => {
     const map = mapRef.current;
     if (!map) return;
@@ -1925,8 +1940,7 @@ export default function RoadDefectsMap() {
       rows.forEach((row, i) => {
         const marker = layers[i + 1];
         if (!marker) return;
-        // confidence may be 0–1 float or 0–100; normalise to 0–100
-        const rawConf = row.confidence ?? 1;           // default show if missing
+        const rawConf = row.confidence ?? 1; // default show if missing
         const confPct = rawConf <= 1 ? rawConf * 100 : rawConf;
         const shouldShow = confPct >= thresholdPct;
         const has = map.hasLayer(marker);
@@ -1938,8 +1952,8 @@ export default function RoadDefectsMap() {
 
   // Called after data loads — just re-apply current threshold
   const recomputeMaxAndApplyFilter = useCallback(() => {
-    applyConfidenceFilter(minConfidence);
-  }, [minConfidence, applyConfidenceFilter]);
+    applyConfidenceFilter(minConfidenceRef.current);
+  }, [applyConfidenceFilter]);
 
   
   const sliderRef = useRef(null);
@@ -1953,6 +1967,7 @@ export default function RoadDefectsMap() {
 
   const handleSliderChange = (e) => {
     const val = parseInt(e.target.value, 10);
+    minConfidenceRef.current = val;
     setMinConfidence(val);
     applyConfidenceFilter(val);
     updateSliderFill(val);
@@ -2118,7 +2133,11 @@ export default function RoadDefectsMap() {
       }
 
       const toFetch = cells.filter((c) => !fetchedCells.current.has(c));
-      const newEvents = await fetchEventsForCells(toFetch, new Set());
+      const newEvents = await fetchEventsForCells(
+        toFetch,
+        new Set(),
+        minConfidenceRef.current,
+      );
       cells.forEach((c) => fetchedCells.current.add(c));
       if (!newEvents.length) return;
 
@@ -2180,23 +2199,34 @@ export default function RoadDefectsMap() {
       });
 
       marker.on("mouseover", async (e) => {
+        const cachedEventDetails = eventDetailsCacheRef.current[lastEid];
         let tsStr = row.last_confirmed_at
           ? formatISTDate(row.last_confirmed_at)
-          : lastDetectedTsCacheRef.current[lastEid];
+          : cachedEventDetails?.start_time
+            ? formatISTDate(cachedEventDetails.start_time)
+            : null;
+        let medianSpeedMps = cachedEventDetails?.median_speed_mps ?? null;
 
-        marker.bindTooltip(buildHoverHTML(row, param, tsStr), {
+        marker.bindTooltip(buildHoverHTML(row, param, tsStr, medianSpeedMps), {
           sticky: true, opacity: 1, className: "rdm-tooltip",
         }).openTooltip(e.latlng);
         marker.setStyle({ fillOpacity: 1, weight: 3 });
 
-        if (!tsStr) {
-          if (!lastDetectedTsCacheRef.current[lastEid]) {
-            const fetched = await fetchEventTimestamp(lastEid);
-            if (fetched) lastDetectedTsCacheRef.current[lastEid] = formatISTDate(fetched);
-          }
-          const resolved = lastDetectedTsCacheRef.current[lastEid];
-          if (resolved && marker.isTooltipOpen()) {
-            marker.setTooltipContent(buildHoverHTML(row, param, resolved));
+        if (lastEid && !eventDetailsCacheRef.current[lastEid]) {
+          const fetched = await fetchEventDetails(lastEid);
+          if (fetched) eventDetailsCacheRef.current[lastEid] = fetched;
+          if (marker.isTooltipOpen()) {
+            const resolved = row.last_confirmed_at
+              ? formatISTDate(row.last_confirmed_at)
+              : fetched?.start_time
+                ? formatISTDate(fetched.start_time)
+                : null;
+            marker.setTooltipContent(buildHoverHTML(
+              row,
+              param,
+              resolved,
+              fetched?.median_speed_mps ?? null,
+            ));
           }
         }
       });

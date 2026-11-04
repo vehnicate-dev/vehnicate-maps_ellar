@@ -169,7 +169,12 @@ def record_trip_passes(supabase_target: Client, gps_df, run=lambda q: q.execute(
         else:
             confidence = max(0.0, min(100.0, flags / pass_count * 100.0))
 
-        if visits == 0 and confidence == float(d.get("confidence") or 0.0):
+        stored_confidence = d.get("confidence")
+        if (
+            visits == 0
+            and stored_confidence is not None
+            and confidence == float(stored_confidence)
+        ):
             continue
         run(
             supabase_target.table("hexagons")
@@ -266,10 +271,30 @@ def update_hexagons(
     for event in new_events_sorted:
         by_hex.setdefault(event["h3_index"], []).append(event)
 
+    session_ellar_credits: dict[str, dict[str, float]] = {}
     for h3_index, events in by_hex.items():
-        _process_hex_incremental(
+        hex_session_credits = _process_hex_incremental(
             supabase_target, h3_index, events, imu_only, test_mode=test_mode
         )
+        for session_id, credits in hex_session_credits.items():
+            totals = session_ellar_credits.setdefault(
+                session_id, {"liquid_ellar": 0.0, "frozen_ellar": 0.0}
+            )
+            totals["liquid_ellar"] += credits["liquid_ellar"]
+            totals["frozen_ellar"] += credits["frozen_ellar"]
+
+    if not test_mode:
+        for session_id, credits in session_ellar_credits.items():
+            if credits["liquid_ellar"] == 0.0 and credits["frozen_ellar"] == 0.0:
+                continue
+            supabase_target.rpc(
+                "add_session_ellar_credits",
+                {
+                    "p_session_id": session_id,
+                    "p_liquid_ellar": credits["liquid_ellar"],
+                    "p_frozen_ellar": credits["frozen_ellar"],
+                },
+            ).execute()
 
     supabase_target.rpc("refresh_hexagon_parameters", {}).execute()
 
@@ -280,7 +305,7 @@ def _process_hex_incremental(
     new_events: list,
     imu_only: bool = False,
     test_mode: bool = False,
-) -> None:
+) -> dict[str, dict[str, float]]:
     reward_multiplier = 0.0 if test_mode else (0.5 if imu_only else 1.0)
 
     # Fetch rows from this hex AND its immediate ring-1 neighbors, so points
@@ -363,6 +388,14 @@ def _process_hex_incremental(
     # Per-user balance deltas, applied once at the end.
     frozen_delta: dict[str, float] = {}
     liquid_delta: dict[str, float] = {}
+    session_ellar_credits: dict[str, dict[str, float]] = {}
+
+    def _record_session_credit(session_id: str, column: str, amount: float) -> None:
+        if amount:
+            credits = session_ellar_credits.setdefault(
+                session_id, {"liquid_ellar": 0.0, "frozen_ellar": 0.0}
+            )
+            credits[column] += amount
 
     def _bump_frozen(uid: str, amount: float) -> None:
         if amount:
@@ -449,6 +482,7 @@ def _process_hex_incremental(
                     nD = len(prior_confirmers) + 1
                     confirmation_reward = reward_multiplier * (2 - math.log10(nD))
                     _bump_liquid(uid, confirmation_reward)
+                    _record_session_credit(tid, "liquid_ellar", confirmation_reward)
                     liquid_ellar_hex += confirmation_reward
                     ledger_confirmation_liquid(
                         supabase_target, uid, confirmation_reward,
@@ -563,6 +597,7 @@ def _process_hex_incremental(
                     "event_id":    [eid],
                     "flag_ts_ms":  [_to_ms(event["start_time"])],
                     "confirmed":   False,
+                    "confidence":  0.0,
                     "legit":       False,
                     "jerk_values": [],
                     "direction_label": event_direction,
@@ -579,6 +614,7 @@ def _process_hex_incremental(
                 rD_running += 1
 
                 _bump_frozen(uid, discovery_reward)
+                _record_session_credit(tid, "frozen_ellar", discovery_reward)
                 frozen_ellar_hex += discovery_reward
                 if trip_idx is not None:
                     ellar_user_hex[trip_idx] += discovery_reward
@@ -639,6 +675,7 @@ def _process_hex_incremental(
         f"confirmations={confirmation_count} | rD={rD_running} | "
         f"frozen_ellar_hex={frozen_ellar_hex:.4f} | liquid_ellar_hex={liquid_ellar_hex:.4f}"
     )
+    return session_ellar_credits
 
 
 def _check_illegit_defects(

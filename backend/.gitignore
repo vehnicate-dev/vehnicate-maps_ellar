@@ -5,3 +5,6 @@ tests/
 migrations/*
 !migrations/20261022_add_session_data_processing_indexes.sql
 !migrations/20261103_speed_adjusted_hexagon_parameters.sql
+!migrations/20261104_add_hexagons_pass_count.sql
+!migrations/20261104_default_hexagon_confidence_to_zero.sql
+!migrations/20261104_add_session_ellar_credits.sql

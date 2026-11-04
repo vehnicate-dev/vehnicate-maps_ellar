@@ -1,3 +1,9 @@
+# SESSION TABLE
+# On sessions, liquid_ellar and frozen_ellar accumulate the liquid confirmation
+# rewards and frozen discovery rewards earned by that session. Releasing a
+# discovery reward from frozen to liquid is a balance transfer, not a new
+# session credit, and is not counted again.
+
 ##############################################################################
 # HEXAGONS TABLE - what each column means
 # one row = one unique road defect (rD)
