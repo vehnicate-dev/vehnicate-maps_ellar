@@ -491,13 +491,15 @@ async function fetchEventsForCells(cells, cachedCells, minConfidencePct) {
         .from("hexagons")
         .select("h3_index, lat, lon, parameter, event_id, confidence, last_confirmed_at, jerk_values")
         .in("h3_index", chunk);
-      if (minConfidencePct > 0) {
+      if (minConfidencePct === 0) {
+        query = query.gte("confidence", 0);
+      } else {
         query = query.or(
           `confidence.gte.${minConfidencePct},and(confidence.gte.${minConfidencePct / 100},confidence.lte.1)`,
         );
       }
       const { data, error } = await query;
-      if (error) { console.error("[supabase] roaddefects:", error); return []; }
+      if (error) throw error;
       return data || [];
     })
   );
@@ -1747,8 +1749,9 @@ export default function RoadDefectsMap() {
   const rotationCacheRef = useRef({});
   const imageEligibilityCacheRef = useRef({}); // rowKey -> eligible eid (or null)
   const eventDetailsCacheRef = useRef({}); // eid -> start_time and median_speed_mps
-  const fetchedCells  = useRef(new Set());
+  const fetchedCells  = useRef(new Map());
   const isFetchingRef = useRef(false);
+  const viewportLoadPendingRef = useRef(false);
   const searchPinRef  = useRef(null);
   const toggleBtnRef  = useRef(null);
   const irisLayerRef  = useRef(null);
@@ -2109,7 +2112,11 @@ export default function RoadDefectsMap() {
 
   const loadViewport = useCallback(async () => {
     const map = mapRef.current;
-    if (!map || isFetchingRef.current) return;
+    if (!map) return;
+    if (isFetchingRef.current) {
+      viewportLoadPendingRef.current = true;
+      return;
+    }
 
     const zoom = map.getZoom();
     if (zoom < MIN_ZOOM_FOR_FETCH) {
@@ -2132,14 +2139,18 @@ export default function RoadDefectsMap() {
         return;
       }
 
-      const toFetch = cells.filter((c) => !fetchedCells.current.has(c));
+      const minConfidencePct = minConfidenceRef.current;
+      const toFetch = cells.filter((c) => {
+        const fetchedThreshold = fetchedCells.current.get(c);
+        return fetchedThreshold === undefined || fetchedThreshold > minConfidencePct;
+      });
+      if (!toFetch.length) return;
       const newEvents = await fetchEventsForCells(
         toFetch,
         new Set(),
-        minConfidenceRef.current,
+        minConfidencePct,
       );
-      cells.forEach((c) => fetchedCells.current.add(c));
-      if (!newEvents.length) return;
+      toFetch.forEach((c) => fetchedCells.current.set(c, minConfidencePct));
 
       const byHex = {};
       for (const ev of newEvents) {
@@ -2148,8 +2159,14 @@ export default function RoadDefectsMap() {
         byHex[ev.h3_index].push(ev);
       }
       for (const [hexId, events] of Object.entries(byHex)) {
-        if (!eventCacheRef.current[hexId]) eventCacheRef.current[hexId] = [];
-        eventCacheRef.current[hexId].push(...events);
+        const cachedRows = eventCacheRef.current[hexId] || [];
+        const rowsByLocation = new Map(
+          cachedRows.map((row) => [`${row.lat.toFixed(6)},${row.lon.toFixed(6)}`, row]),
+        );
+        events.forEach((row) => {
+          rowsByLocation.set(`${row.lat.toFixed(6)},${row.lon.toFixed(6)}`, row);
+        });
+        eventCacheRef.current[hexId] = [...rowsByLocation.values()];
         drawHex(hexId, eventCacheRef.current[hexId]);
       }
       recomputeMaxAndApplyFilter();
@@ -2157,6 +2174,10 @@ export default function RoadDefectsMap() {
       console.error("[loadViewport]", err);
     } finally {
       isFetchingRef.current = false;
+      if (viewportLoadPendingRef.current) {
+        viewportLoadPendingRef.current = false;
+        setTimeout(loadViewport, 0);
+      }
     }
   }, [recomputeMaxAndApplyFilter]);
 
@@ -2319,7 +2340,7 @@ export default function RoadDefectsMap() {
     clearDetailLayers();
     eventCacheRef.current = {};
     imageEligibilityCacheRef.current = {};
-    fetchedCells.current = new Set();
+    fetchedCells.current = new Map();
     isFetchingRef.current = false;
 
     try {
