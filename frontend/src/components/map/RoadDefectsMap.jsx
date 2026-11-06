@@ -1043,6 +1043,21 @@ const styles = `
     align-items: flex-start;
   }
   #rdm-city-nav::-webkit-scrollbar { display: none; }
+  #rdm-city-nav.has-more-cities {
+    max-height: min(544px, calc(100% - 100px));
+    scrollbar-width: thin;
+    scrollbar-color: #fff transparent;
+    -ms-overflow-style: auto;
+  }
+  #rdm-city-nav.has-more-cities::-webkit-scrollbar {
+    display: block;
+    width: 6px;
+  }
+  #rdm-city-nav.has-more-cities::-webkit-scrollbar-track { background: transparent; }
+  #rdm-city-nav.has-more-cities::-webkit-scrollbar-thumb {
+    background: #fff;
+    border-radius: 99px;
+  }
   .rdm-city-bubble {
     box-sizing: border-box;
     width: max-content;
@@ -2369,7 +2384,12 @@ export default function RoadDefectsMap() {
         </div>
 
         <SearchBar onSelect={handleSearchSelect} />
-        <div id="rdm-city-nav" aria-label="Covered cities">
+        <div
+          id="rdm-city-nav"
+          className={cityCoverage.length > 12 ? "has-more-cities" : ""}
+          aria-label="Covered cities"
+          onWheel={(event) => event.stopPropagation()}
+        >
           {cityCoverage.map(renderCityBubble)}
           {!cityCoverageLoaded && <span className="rdm-city-sheet-message">Loading cities…</span>}
           {cityCoverageLoaded && cityCoverage.length === 0 && (
