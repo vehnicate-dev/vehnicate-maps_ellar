@@ -7,6 +7,10 @@ def _ledger_entry(
     amount: float,
     ellar_type: str,
     comment: str,
+    h3_index: str,
+    hexagon_id: int | None,
+    n: int | None,
+    session_id: str | None,
     sender_id: str | None = None,
 ) -> None:
     """Insert one row into the ledger table. sender_id=None means system-issued."""
@@ -18,6 +22,10 @@ def _ledger_entry(
         "amount":      round(amount, 6),
         "type":        ellar_type,
         "comment":     comment,
+        "h3_index":    h3_index,
+        "hexagon_id":  hexagon_id,
+        "n":           n,
+        "session_id":  session_id,
     }).execute()
 
 
@@ -30,16 +38,17 @@ def ledger_discovery_frozen(
     to_user_id: str,
     amount: float,
     h3_index: str,
-    hex_row_id,          # hexagons.id of the newly inserted rD row
+    hex_row_id: int | None,  # hexagons.id of the newly inserted rD row
     n: int,               # generation index of the discovering trip
     k: int,               # number of rD flags this trip made
+    session_id: str,
 ) -> None:
     """Discovery reward — frozen until legit check clears it."""
-    comment = (
-        f"Discovery reward (frozen) | hex={h3_index} | "
-        f"hexagons.roaddefect_id={hex_row_id} | n={n} | k={k}"
+    _ledger_entry(
+        supabase_target, to_user_id, amount, "frozen",
+        f"Discovery reward (frozen) | k={k}",
+        h3_index, hex_row_id, n, session_id,
     )
-    _ledger_entry(supabase_target, to_user_id, amount, "frozen", comment)
 
 
 # NOTE: no longer called by hexagons_update.py — kept for now since it's
@@ -53,23 +62,26 @@ def ledger_discovery_liquid(
     to_user_id: str,
     amount: float,
     h3_index: str,
-    hex_row_id,
+    hex_row_id: int | None,
     n: int,
     k: int,
     nd: int,             # number of detections on this rD at time of legit check
     I: float,            # illegitimacy ratio for the trip
     legit_rD: int,       # number of rDs found legit out of k
+    session_id: str,
 ) -> None:
     """
     Discovery reward unfrozen after legit check.
     Also covers the late-legitimacy top-up for a single rD.
     """
     comment = (
-        f"Discovery reward (liquid, post-legit) | hex={h3_index} | "
-        f"hexagons.roaddefect_id={hex_row_id} | n={n} | k={k} | nd={nd} | "
+        f"Discovery reward (liquid, post-legit) | k={k} | nd={nd} | "
         f"I={I:.4f} | legit_rD/k={legit_rD}/{k}"
     )
-    _ledger_entry(supabase_target, to_user_id, amount, "liquid", comment)
+    _ledger_entry(
+        supabase_target, to_user_id, amount, "liquid", comment,
+        h3_index, hex_row_id, n, session_id,
+    )
 
 
 # NOTE: same as above — no longer called; the late-legitimacy top-up concept
@@ -80,17 +92,18 @@ def ledger_late_legit_liquid(
     to_user_id: str,
     amount: float,
     h3_index: str,
-    hex_row_id,
+    hex_row_id: int | None,
     n: int,
     k: int,
     nd: int,
+    session_id: str,
 ) -> None:
     """Late-legitimacy top-up for a single rD that flipped from illegit → legit."""
-    comment = (
-        f"Late-legitimacy reward (liquid) | hex={h3_index} | "
-        f"hexagons.roaddefect_id={hex_row_id} | n={n} | k={k} | nd={nd}"
+    _ledger_entry(
+        supabase_target, to_user_id, amount, "liquid",
+        f"Late-legitimacy reward (liquid) | k={k} | nd={nd}",
+        h3_index, hex_row_id, n, session_id,
     )
-    _ledger_entry(supabase_target, to_user_id, amount, "liquid", comment)
 
 
 def ledger_confirmation_liquid(
@@ -98,15 +111,16 @@ def ledger_confirmation_liquid(
     to_user_id: str,
     amount: float,
     h3_index: str,
-    hex_row_id,
-    nd: int,
+    hex_row_id: int | None,
+    confirmation_rank: int,
+    session_id: str,
 ) -> None:
     """Confirmation reward — always immediately liquid."""
-    comment = (
-        f"Confirmation reward (liquid) | hex={h3_index} | "
-        f"hexagons.roaddefect_id={hex_row_id} | nd={nd}"
+    _ledger_entry(
+        supabase_target, to_user_id, amount, "liquid",
+        f"Confirmation reward (liquid) | confirmer_rank={confirmation_rank}",
+        h3_index, hex_row_id, None, session_id,
     )
-    _ledger_entry(supabase_target, to_user_id, amount, "liquid", comment)
 
 
 def ledger_confirmation_unfreeze(
@@ -114,8 +128,9 @@ def ledger_confirmation_unfreeze(
     to_user_id: str,
     amount: float,
     h3_index: str,
-    hex_row_id,
-    n: int,               # generation index of the discoverer's own trip
+    hex_row_id: int | None,
+    n: int | None,        # generation index of the discoverer's own trip
+    session_id: str | None,
 ) -> None:
     """
     Moves a discoverer's original discovery reward from frozen to liquid,
@@ -124,12 +139,15 @@ def ledger_confirmation_unfreeze(
     and a matching credit against liquid, so the ledger reflects the actual
     balance movement rather than a net figure.
     """
-    comment = (
-        f"Discovery reward unfrozen (first confirmation) | hex={h3_index} | "
-        f"hexagons.roaddefect_id={hex_row_id} | n={n}"
+    comment = "Discovery reward unfrozen (first confirmation)"
+    _ledger_entry(
+        supabase_target, to_user_id, -amount, "frozen", comment,
+        h3_index, hex_row_id, n, session_id,
     )
-    _ledger_entry(supabase_target, to_user_id, -amount, "frozen", comment)
-    _ledger_entry(supabase_target, to_user_id, amount, "liquid", comment)
+    _ledger_entry(
+        supabase_target, to_user_id, amount, "liquid", comment,
+        h3_index, hex_row_id, n, session_id,
+    )
 
 
 def ledger_illegit_penalty(
@@ -137,8 +155,9 @@ def ledger_illegit_penalty(
     from_user_id: str,
     penalty_frozen: float,
     h3_index: str,
-    hex_row_id,
+    hex_row_id: int | None,
     n: int,               # generation index of the discoverer's own trip
+    session_id: str,
 ) -> None:
     """
     Penalizes a discoverer whose road defect failed the 5-trip legitimacy
@@ -146,8 +165,8 @@ def ledger_illegit_penalty(
     discovery reward for that defect is removed entirely. There is no
     liquid-side penalty — only the frozen reward is clawed back.
     """
-    comment = (
-        f"Illegitimate road defect penalty | hex={h3_index} | "
-        f"hexagons.roaddefect_id={hex_row_id} | n={n}"
+    _ledger_entry(
+        supabase_target, from_user_id, -penalty_frozen, "frozen",
+        "Illegitimate road defect penalty",
+        h3_index, hex_row_id, n, session_id,
     )
-    _ledger_entry(supabase_target, from_user_id, -penalty_frozen, "frozen", comment)

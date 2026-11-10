@@ -486,7 +486,7 @@ def _process_hex_incremental(
                     liquid_ellar_hex += confirmation_reward
                     ledger_confirmation_liquid(
                         supabase_target, uid, confirmation_reward,
-                        h3_index, row["id"], nD,
+                        h3_index, row["id"], nD, tid,
                     )
 
                     if not was_legit_before:
@@ -521,6 +521,7 @@ def _process_hex_incremental(
                                 ledger_confirmation_unfreeze(
                                     supabase_target, discoverer_uid, unfreeze_amt,
                                     row["h3_index"], row["id"], n_disc,
+                                    discoverer_trip,
                                 )
                             is_legit_now = True
                         else:
@@ -622,7 +623,7 @@ def _process_hex_incremental(
                 if not test_mode:
                     ledger_discovery_frozen(
                         supabase_target, uid, discovery_reward,
-                        h3_index, cached.get("id"), N, cur_k,
+                        h3_index, cached.get("id"), N, cur_k, tid,
                     )
 
     # Check whether the trip discovering 10 trips ago earned legitimacy for
@@ -742,22 +743,40 @@ def _check_illegit_defects(
 
         ledger_illegit_penalty(
             supabase_target, examined_user, penalty_frozen,
-            h3_index, row.get("id"), n_disc,
+            h3_index, row.get("id"), n_disc, examined_trip_id,
         )
 
-        discard.append((key, row.get("id")))
+        discard.append((key, row.get("id"), row.get("event_id") or []))
         print(
             f"  [illegit] trip={examined_trip_id} n={n_disc} "
             f"rd_id={row.get('id')} frozen_penalty={penalty_frozen:.4f} "
             f"user={examined_user}"
         )
 
-    for key, row_id in discard:
+    for key, row_id, row_event_ids in discard:
         if row_id is not None:
             try:
                 supabase_target.table("hexagons").delete().eq("id", row_id).execute()
             except Exception as del_err:
                 print(f"  [illegit] failed to discard rd_id={row_id}: {del_err}")
+            else:
+                event_ids = [
+                    event_id for event_id in row_event_ids
+                    if event_id is not None
+                ]
+                if event_ids:
+                    try:
+                        (
+                            supabase_target.table("imu_events")
+                            .delete()
+                            .in_("imu_events_id", event_ids)
+                            .execute()
+                        )
+                    except Exception as event_del_err:
+                        print(
+                            f"  [illegit] failed to delete imu_events "
+                            f"for rd_id={row_id}, event_ids={event_ids}: {event_del_err}"
+                        )
         existing_same_hex.pop(key, None)
 
     return total_frozen_penalty
