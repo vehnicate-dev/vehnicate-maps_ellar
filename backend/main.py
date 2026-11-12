@@ -1460,7 +1460,6 @@ def _replay_all_sessions_inner(target_role: str) -> None:
     except Exception as err:
         raise RuntimeError(f"Failed to reset {target_role} replay target: {err!r}") from err
 
-    failures = []
     for i, session in enumerate(sessions):
         session_id = session["session_id"]
         print(
@@ -1491,17 +1490,16 @@ def _replay_all_sessions_inner(target_role: str) -> None:
                     "later sessions were not processed because map coverage "
                     f"is unavailable: {trip_err}"
                 ) from trip_err
-            failures.append((session_id, trip_err))
             print(
-                f"[replay:{target_role}] session {session_id} FAILED: "
+                f"[replay:{target_role}] HALTED at session {session_id} "
+                "after processing failure: "
                 f"{trip_err!r}"
             )
-
-    if failures:
-        failed_ids = ", ".join(session_id for session_id, _ in failures)
-        raise RuntimeError(
-            f"{target_role} replay completed with {len(failures)} failures: {failed_ids}"
-        )
+            raise RuntimeError(
+                f"{target_role} replay halted at session={session_id}; "
+                "later sessions were not processed to preserve chronological "
+                f"processing order: {trip_err!r}"
+            ) from trip_err
     print(f"[replay:{target_role}] finished replaying all sessions.")
 
 
