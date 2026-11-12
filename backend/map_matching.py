@@ -67,6 +67,7 @@ from leuvenmapmatching.matcher.distance import DistanceMatcher
 # ---------------------------------------------------------------------------
 
 _MAP_CON: Optional[InMemMap] = None
+_ACTIVE_PBF_PATHS: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +259,7 @@ class _NodeCollector(osm.SimpleHandler):
         self.added_ids: set[int] = set()
 
     def node(self, n):
-        if n.id not in self.wanted_ids:
+        if n.id not in self.wanted_ids or n.id in self.added_ids:
             return
 
         if not n.location.valid():
@@ -276,7 +277,7 @@ class _NodeCollector(osm.SimpleHandler):
 # BUILD MAP
 # ---------------------------------------------------------------------------
 
-def _build_map_from_pbf(osm_pbf_path: str) -> InMemMap:
+def _build_map_from_pbf(osm_pbf_paths: list[str]) -> InMemMap:
     """
     Build the LeuvenMapMatching InMemMap from an OSM PBF.
 
@@ -287,8 +288,11 @@ def _build_map_from_pbf(osm_pbf_path: str) -> InMemMap:
 
     global _EDGE_TO_WAY
 
+    if not osm_pbf_paths:
+        raise ValueError("At least one OSM PBF path is required.")
+
     map_con = InMemMap(
-        "chennai",
+        "road_network",
         use_latlon=True,
         use_rtree=True,
         index_edges=True,
@@ -299,7 +303,8 @@ def _build_map_from_pbf(osm_pbf_path: str) -> InMemMap:
     # -----------------------------------------------------------------------
 
     way_collector = _WayCollector()
-    way_collector.apply_file(osm_pbf_path)
+    for osm_pbf_path in osm_pbf_paths:
+        way_collector.apply_file(osm_pbf_path)
 
     # -----------------------------------------------------------------------
     # PASS 2: nodes
@@ -310,7 +315,8 @@ def _build_map_from_pbf(osm_pbf_path: str) -> InMemMap:
         map_con,
     )
 
-    node_collector.apply_file(osm_pbf_path)
+    for osm_pbf_path in osm_pbf_paths:
+        node_collector.apply_file(osm_pbf_path)
 
     # -----------------------------------------------------------------------
     # Add directed edges
@@ -779,29 +785,45 @@ def _ensure_osm_extract(
 # ---------------------------------------------------------------------------
 
 def init_map_matcher(
-    osm_pbf_path: str,
+    osm_pbf_paths: str | list[str],
     osm_pbf_url: str | None = None,
 ) -> None:
     """
-    Initialize the OSM road graph.
+    Initialize one graph from one or more extracts.
 
-    Call this ONCE during FastAPI startup.
+    Reuse the active graph when the exact same extract paths are requested
+    consecutively. Trip processing is serialized by the backend worker.
     """
 
-    global _MAP_CON
+    global _MAP_CON, _ACTIVE_PBF_PATHS
 
-    _ensure_osm_extract(
-        osm_pbf_path,
-        osm_pbf_url,
-    )
+    paths = [osm_pbf_paths] if isinstance(osm_pbf_paths, str) else list(osm_pbf_paths)
+    if not paths:
+        raise ValueError("At least one OSM PBF path is required.")
 
-    _MAP_CON = _build_map_from_pbf(
-        osm_pbf_path
-    )
+    if osm_pbf_url and len(paths) == 1:
+        _ensure_osm_extract(paths[0], osm_pbf_url)
+
+    normalized_paths = tuple(os.path.abspath(path) for path in paths)
+    if _MAP_CON is not None and normalized_paths == _ACTIVE_PBF_PATHS:
+        print(
+            f"[map_matching] reusing graph for "
+            f"{len(normalized_paths)} region extract(s)"
+        )
+        return
+
+    missing_paths = [path for path in paths if not os.path.isfile(path)]
+    if missing_paths:
+        raise FileNotFoundError(
+            "OSM PBF file(s) are missing: " + ", ".join(missing_paths)
+        )
+
+    _MAP_CON = _build_map_from_pbf(paths)
+    _ACTIVE_PBF_PATHS = normalized_paths
 
     print(
-        f"[map_matching] loaded OSM extract from "
-        f"{osm_pbf_path}"
+        f"[map_matching] loaded combined graph from "
+        f"{len(paths)} OSM extract(s)"
     )
 
 

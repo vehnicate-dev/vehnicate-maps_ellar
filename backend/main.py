@@ -7,6 +7,8 @@ import math
 import time
 import queue
 import threading
+import tempfile
+import hmac
 from functools import wraps
 from contextlib import closing
 import httpx
@@ -23,6 +25,12 @@ from hexagons_update import update_hexagons, record_trip_passes
 from zoneinfo import ZoneInfo
 from distance import compute_total_distance
 from map_matching import init_map_matcher, map_match_trip
+from map_regions import (
+    MapDataUnavailableError,
+    ensure_region_extract,
+    register_road_region,
+    regions_for_trace,
+)
 from velocity_jerk import estimate_velocity_jerk
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Header   # added Header
 from geographies import add_session_geographies, backfill_all_geographies
@@ -84,11 +92,12 @@ TARGET_PRODUCTION_KEY = os.environ.get("TARGET_PRODUCTION_KEY", os.environ.get("
 TARGET_TEST_URL = os.environ.get("TARGET_TEST_URL")
 TARGET_TEST_KEY = os.environ.get("TARGET_TEST_KEY")
 
-# Chennai OSM extract used for map-matching. Loaded once at startup;
-# downloaded automatically to OSM_PBF_PATH if not already present (Railway's
-# filesystem is ephemeral, so this runs on every fresh deploy/restart).
-OSM_PBF_PATH = os.environ.get("OSM_PBF_PATH", "chennai.osm.pbf")
-OSM_PBF_URL = os.environ.get("OSM_PBF_URL")  # direct .osm.pbf download link
+# Regional OSM extracts are downloaded lazily to this cache when a trip needs
+# them. Railway's filesystem is ephemeral, so a deploy may download them again.
+MAP_CACHE_DIR = os.environ.get(
+    "MAP_CACHE_DIR",
+    os.path.join(tempfile.gettempdir(), "vehnicate-road-network-cache"),
+)
 
 # Must match AlivRoadDefects(fs=…) below
 #ALIV_FS          = 40 # previously 80
@@ -126,8 +135,11 @@ app.add_middleware(
 # thread pulling from a FIFO queue guarantees the same "one trip fully
 # finishes before the next starts" property that /replay_all_sessions already
 # has for the bulk-replay case, but for live webhook traffic too.
-_trip_queue: "queue.Queue[tuple]" = queue.Queue()
+_trip_queue: "queue.Queue[tuple[str, int, str, str, str, str]]" = queue.Queue()
 _pipeline_lock = threading.RLock()
+_trip_state_lock = threading.Lock()
+_trip_resume_event = threading.Event()
+_blocked_trip: tuple[str, int, str, str, str, str] | None = None
 
 
 def _serialize_pipeline(function):
@@ -139,24 +151,40 @@ def _serialize_pipeline(function):
 
 
 def _trip_worker() -> None:
+    global _blocked_trip
     while True:
-        session_id, vehicle_id, user_id, start_time, end_time, target_role = _trip_queue.get()
-        try:
-            process_trip(
-                session_id,
-                vehicle_id,
-                user_id,
-                start_time,
-                end_time,
-                target_role=target_role,
-            )
-        except Exception as err:
-            # process_trip() already logs and re-raises internally; catch here
-            # too so one bad trip can never kill the worker thread and silently
-            # stop all future processing.
-            print(f"[trip_worker] session={session_id} raised: {err!r}")
-        finally:
-            _trip_queue.task_done()
+        trip = _trip_queue.get()
+        session_id, vehicle_id, user_id, start_time, end_time, target_role = trip
+        while True:
+            try:
+                process_trip(
+                    session_id,
+                    vehicle_id,
+                    user_id,
+                    start_time,
+                    end_time,
+                    target_role=target_role,
+                )
+            except MapDataUnavailableError as err:
+                with _trip_state_lock:
+                    _trip_resume_event.clear()
+                    _blocked_trip = trip
+                print(
+                    f"[trip_worker] HALTED at session={session_id}: {err}. "
+                    f"{_trip_queue.qsize()} later session(s) remain queued. "
+                    "Upload/fix the required map extract, then call "
+                    "POST /resume_trip_queue with X-API-Key."
+                )
+                _trip_resume_event.wait()
+                with _trip_state_lock:
+                    _blocked_trip = None
+                print(f"[trip_worker] retrying blocked session={session_id}")
+                continue
+            except Exception as err:
+                # Don't let an unexpected trip failure kill the worker.
+                print(f"[trip_worker] session={session_id} raised: {err!r}")
+            break
+        _trip_queue.task_done()
 
 
 @app.on_event("startup")
@@ -164,17 +192,25 @@ def _start_trip_worker() -> None:
     threading.Thread(target=_trip_worker, daemon=True).start()
 
 
-@app.on_event("startup")
-def _load_map_matcher() -> None:
-    # Parsing the OSM extract into an InMemMap is expensive — do it once per
-    # process, never inside process_trip().
+def _load_map_matcher_for_trace(gps_df: pd.DataFrame) -> None:
+    regions = regions_for_trace(
+        gps_df[["latitude", "longitude"]].itertuples(index=False, name=None)
+    )
+    print(
+        "[map_matching] session route requires region(s): "
+        + ", ".join(region.region_id for region in regions)
+    )
+    paths = [
+        ensure_region_extract(region, MAP_CACHE_DIR)
+        for region in regions
+    ]
     try:
-        init_map_matcher(OSM_PBF_PATH, OSM_PBF_URL)
+        init_map_matcher(paths)
     except Exception as err:
-        # Don't crash the whole service if the extract is missing/misconfigured
-        # in a given environment — map_match_trip() will raise per-request
-        # instead, which surfaces clearly in that trip's background-task log.
-        print(f"[startup] map matcher failed to initialize: {err!r}")
+        raise MapDataUnavailableError(
+            "Unable to build the road graph for region(s) "
+            f"{', '.join(region.region_id for region in regions)}: {err!r}"
+        ) from err
 
 
 # ── Supabase client factory ─────────────────────────────────────────────────
@@ -275,6 +311,11 @@ class WebhookPayload(BaseModel):
     table: str
     schema: str
     record: SessionRecord
+
+
+class MapRegionRegistration(BaseModel):
+    region_id: str
+    bounds: list[float]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -981,10 +1022,6 @@ def _process_trip_inner(
         raise ValueError(f"Unknown processing target: {target_role}")
 
     is_test_target = target_role == "test"
-    if test_session_exists:
-        _set_test_db_processed(supabase_source, session_id, True)
-    elif not is_test_target:
-        _set_test_db_processed(supabase_source, session_id, False)
 
     supabase_target = (
         supabase_test if is_test_target else _make_production_target_client()
@@ -1030,6 +1067,19 @@ def _process_trip_inner(
     # trace or an Aliv run either.
     total_distance_m = compute_total_distance(gps_df)
     print(f"[process_trip] Total distance: {total_distance_m:.2f} m")
+
+    needs_map_match = (
+        not already_processed
+        and len(gps_rows) >= MIN_GPS_POINTS
+        and total_distance_m >= MIN_TRIP_DISTANCE_M
+    )
+    if needs_map_match:
+        _load_map_matcher_for_trace(gps_df)
+
+    if test_session_exists:
+        _set_test_db_processed(supabase_source, session_id, True)
+    elif not is_test_target:
+        _set_test_db_processed(supabase_source, session_id, False)
 
     target_vehicle_id = vehicle_id
     if is_test_target and total_distance_m > 0:
@@ -1221,6 +1271,74 @@ def Aliv_for_MVP1(payload: WebhookPayload):
     return {"status": "received"}
 
 
+@app.post("/resume_trip_queue")
+def resume_trip_queue(x_api_key: str = Header(None)):
+    _require_map_queue_api_key(x_api_key)
+
+    with _trip_state_lock:
+        if _blocked_trip is None:
+            raise HTTPException(
+                status_code=409,
+                detail="The trip queue is not halted for missing map data",
+            )
+        blocked_session_id = _blocked_trip[0]
+        _trip_resume_event.set()
+
+    print(
+        f"[trip_worker] manual resume requested for "
+        f"blocked session={blocked_session_id}"
+    )
+    return {
+        "status": "resume_requested",
+        "session_id": blocked_session_id,
+        "queued_sessions": _trip_queue.qsize(),
+    }
+
+
+def _require_map_queue_api_key(x_api_key: str | None) -> None:
+    expected = os.environ.get("MAP_QUEUE_API_KEY")
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="MAP_QUEUE_API_KEY is not configured",
+        )
+    if not x_api_key or not hmac.compare_digest(x_api_key, expected):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.post("/register_map_region")
+def register_map_region(
+    payload: MapRegionRegistration,
+    x_api_key: str = Header(None),
+):
+    _require_map_queue_api_key(x_api_key)
+    try:
+        region = register_road_region(payload.region_id, payload.bounds)
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail=str(err)) from err
+
+    with _trip_state_lock:
+        blocked_session_id = _blocked_trip[0] if _blocked_trip else None
+        if blocked_session_id:
+            _trip_resume_event.set()
+
+    print(
+        f"[map_matching] registered region={region.region_id} "
+        f"bounds={region.bounds} object={region.filename}"
+    )
+    if blocked_session_id:
+        print(
+            f"[trip_worker] resuming blocked session={blocked_session_id} "
+            f"after region registration"
+        )
+    return {
+        "status": "registered_and_resuming" if blocked_session_id else "registered",
+        "region_id": region.region_id,
+        "object": region.filename,
+        "session_id": blocked_session_id,
+    }
+
+
 @app.get("/public/ellar-totals")
 def get_public_ellar_totals():
     if not TARGET_PRODUCTION_URL or not TARGET_PRODUCTION_KEY:
@@ -1273,6 +1391,12 @@ def get_public_ellar_totals():
 def _replay_all_sessions_inner(target_role: str) -> None:
     if target_role not in ("test", "production"):
         raise ValueError(f"Unknown replay target: {target_role}")
+    with _trip_state_lock:
+        if _blocked_trip is not None:
+            raise RuntimeError(
+                f"Cannot start replay while live queue is halted at "
+                f"session={_blocked_trip[0]} for missing map data."
+            )
     supabase_source = _make_production_source_client()
     supabase_target = (
         _make_test_target_client()
@@ -1361,6 +1485,12 @@ def _replay_all_sessions_inner(target_role: str) -> None:
                 target_role=target_role,
             )
         except Exception as trip_err:
+            if isinstance(trip_err, MapDataUnavailableError):
+                raise RuntimeError(
+                    f"{target_role} replay halted at session={session_id}; "
+                    "later sessions were not processed because map coverage "
+                    f"is unavailable: {trip_err}"
+                ) from trip_err
             failures.append((session_id, trip_err))
             print(
                 f"[replay:{target_role}] session {session_id} FAILED: "
