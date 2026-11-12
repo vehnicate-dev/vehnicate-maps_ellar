@@ -32,6 +32,12 @@ rectangles are in `map_regions.py`; update the URL and bounds there whenever an
 extract is replaced or its coverage changes. The bounds must reflect the
 uploaded extract coverage, not just a city or district name.
 
+Session and user distance totals are calculated from the selected target
+database's `matched_gps_data` rows, using consecutive fixes with a non-null
+`osm_way_id`. Unmatched fallback coordinates are excluded. Test processing
+reads the test target's rows; production processing reads the production
+target's rows.
+
 PBF files are cached under the system temporary directory by default. Set
 `MAP_CACHE_DIR` to use another writable directory. A Railway restart can clear
 this cache, so required extracts may be downloaded again.

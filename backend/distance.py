@@ -24,3 +24,51 @@ def compute_total_distance(gps_df) -> float:
         total += haversine(lats[i - 1], lons[i - 1], lats[i], lons[i])
 
     return total
+
+
+def compute_matched_distance(matched_rows) -> float:
+    """Sum consecutive accepted road-matched fixes, ignoring raw fallbacks."""
+    df = matched_rows.copy()
+    required = {
+        "timestamp_ms",
+        "matched_lat",
+        "matched_lon",
+        "osm_way_id",
+    }
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(
+            "Matched GPS rows are missing required columns: "
+            + ", ".join(sorted(missing))
+        )
+
+    df = df.sort_values("timestamp_ms")
+    total = 0.0
+    previous_point = None
+    for row in df.itertuples(index=False):
+        try:
+            way_id = float(row.osm_way_id)
+        except (TypeError, ValueError):
+            previous_point = None
+            continue
+        if not math.isfinite(way_id):
+            previous_point = None
+            continue
+        try:
+            lat, lon = float(row.matched_lat), float(row.matched_lon)
+        except (TypeError, ValueError):
+            previous_point = None
+            continue
+        if (
+            not math.isfinite(lat)
+            or not math.isfinite(lon)
+            or not -90 <= lat <= 90
+            or not -180 <= lon <= 180
+        ):
+            previous_point = None
+            continue
+        if previous_point is not None:
+            previous_lat, previous_lon = previous_point
+            total += haversine(previous_lat, previous_lon, lat, lon)
+        previous_point = (lat, lon)
+    return total

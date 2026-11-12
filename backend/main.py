@@ -23,7 +23,7 @@ import os
 from dotenv import load_dotenv
 from hexagons_update import update_hexagons, record_trip_passes
 from zoneinfo import ZoneInfo
-from distance import compute_total_distance
+from distance import compute_matched_distance
 from map_matching import init_map_matcher, map_match_trip
 from map_regions import (
     MapDataUnavailableError,
@@ -110,7 +110,7 @@ ANGLE_THRESHOLD_DEG       = 35.0  # |mount yaw offset| beyond this → imu_only 
 MIN_ACCEL_ENERGY          = 5.0   # sum(|a_gps|) needed across the trip before trusting the estimate
 GRAVITY_LOWPASS_WINDOW_S  = 1.5   # rolling window used to separate gravity from user_accel noise
 MIN_COHERENCE = 0.1  # su,sv vector magnitude / energy — below this, the direction estimate is noise-dominated
-MIN_GPS_POINTS = 10  # fewer raw GPS fixes than this → too sparse to trust map-matching/distance/Aliv
+MIN_GPS_POINTS = 10  # fewer raw fixes than this → skip Aliv (matched distance is still calculated)
 MIN_TRIP_DISTANCE_M = 50  # trips that moved less than this overall aren't worth map-matching/Aliv
 app = FastAPI()
 app.add_middleware(
@@ -1061,36 +1061,78 @@ def _process_trip_inner(
         return
 
     gps_df = pd.DataFrame(gps_rows)
+    target_vehicle_id = vehicle_id
 
-    # ── 2a. Total distance, computed on RAW fixes before spending anything on
-    # map-matching — a session that barely moved doesn't need a road-snapped
-    # trace or an Aliv run either.
-    total_distance_m = compute_total_distance(gps_df)
-    print(f"[process_trip] Total distance: {total_distance_m:.2f} m")
-
-    needs_map_match = (
-        not already_processed
-        and len(gps_rows) >= MIN_GPS_POINTS
-        and total_distance_m >= MIN_TRIP_DISTANCE_M
-    )
-    if needs_map_match:
+    if not already_processed and len(gps_rows) >= 2:
         _load_map_matcher_for_trace(gps_df)
+        gps_df = map_match_trip(gps_df)
+
+        matched_records = gps_df[[
+            "timestamp_ms", "matched_lat", "matched_lon", "osm_way_id",
+            "direction_label", "match_raw_distance",
+        ]].to_dict(orient="records")
+        matched_records = [sanitize_for_json(row) for row in matched_records]
+
+        has_accepted_match = any(
+            row.get("osm_way_id") is not None
+            and row.get("matched_lat") is not None
+            and row.get("matched_lon") is not None
+            for row in matched_records
+        )
+        if is_test_target and has_accepted_match:
+            target_vehicle_id = _ensure_test_target_session(
+                supabase_source, supabase_target, session_id
+            )
+            test_session_exists = True
+            _set_test_db_processed(supabase_source, session_id, True)
+
+        if has_accepted_match:
+            for row in matched_records:
+                row["session_id"] = session_id
+            try:
+                _execute_with_retry(
+                    supabase_target.table("matched_gps_data")
+                    .delete()
+                    .eq("session_id", session_id)
+                )
+                _execute_with_retry(
+                    supabase_target.table("matched_gps_data").insert(matched_records)
+                )
+            except Exception as match_err:
+                raise RuntimeError(
+                    f"Could not persist matched GPS rows for session "
+                    f"{session_id}: {match_err!r}"
+                ) from match_err
+
+            stored_matched_rows = fetch_all_pages(
+                supabase_target,
+                table="matched_gps_data",
+                filters=[("eq", "session_id", session_id)],
+                order_col="timestamp_ms",
+            )
+            total_distance_m = compute_matched_distance(
+                pd.DataFrame(stored_matched_rows)
+            )
+        else:
+            total_distance_m = 0.0
+    else:
+        total_distance_m = 0.0
+
+    print(
+        f"[process_trip] matched-road distance from {target_role} target: "
+        f"{total_distance_m:.2f} m"
+    )
 
     if test_session_exists:
         _set_test_db_processed(supabase_source, session_id, True)
     elif not is_test_target:
         _set_test_db_processed(supabase_source, session_id, False)
 
-    target_vehicle_id = vehicle_id
-    if is_test_target and total_distance_m > 0:
-        target_vehicle_id = _ensure_test_target_session(
-            supabase_source, supabase_target, session_id
-        )
-        test_session_exists = True
-        _set_test_db_processed(supabase_source, session_id, True)
-
     if len(gps_rows) < MIN_GPS_POINTS:
-        print(f"[process_trip] Only {len(gps_rows)} GPS points (< {MIN_GPS_POINTS}), skipping map-matching/Aliv.")
+        print(
+            f"[process_trip] Only {len(gps_rows)} GPS points "
+            f"(< {MIN_GPS_POINTS}); skipping Aliv."
+        )
         if not already_processed and total_distance_m > 0:
             _update_session_distance(session_store, session_id, total_distance_m / 1000)
             _add_user_distance(supabase_target, user_id, total_distance_m / 1000)
@@ -1139,23 +1181,6 @@ def _process_trip_inner(
         _add_user_distance(supabase_target, user_id, total_distance_m / 1000)
         _mark_aliv_processed(session_store, session_id)
         return
-
-    # ── 3a. Map-match GPS onto OSM and persist the matched trajectory ──────────
-    gps_df = map_match_trip(gps_df)
-
-    matched_records = gps_df[[
-        "timestamp_ms", "matched_lat", "matched_lon", "osm_way_id",
-        "direction_label", "match_raw_distance",
-    ]].to_dict(orient="records")
-    matched_records = [sanitize_for_json(r) for r in matched_records]
-    for r in matched_records:
-        r["session_id"] = session_id
-    try:
-        _execute_with_retry(
-            supabase_target.table("matched_gps_data").insert(matched_records)
-        )
-    except Exception as match_err:
-        print(f"[process_trip] matched_gps_data insert failed: {match_err}")
 
     df = merge_gps_into_imu(imu_df, gps_df)
     timesent_T0 = pd.to_datetime(df["timestamp_ms"].iloc[0], unit="ms", utc=True)
