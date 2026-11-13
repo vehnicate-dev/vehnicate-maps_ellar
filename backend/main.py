@@ -24,7 +24,11 @@ from dotenv import load_dotenv
 from hexagons_update import update_hexagons, record_trip_passes
 from zoneinfo import ZoneInfo
 from distance import compute_matched_distance
-from map_matching import init_map_matcher, map_match_trip
+from map_matching import (
+    apply_estimated_positions,
+    init_map_matcher,
+    map_match_trip,
+)
 from map_regions import (
     MapDataUnavailableError,
     ensure_region_extract,
@@ -34,6 +38,10 @@ from map_regions import (
 from velocity_jerk import estimate_velocity_jerk
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Header   # added Header
 from geographies import add_session_geographies, backfill_all_geographies
+from yaw import (
+    convert_gyro_z_with_aliv_orientation,
+    gps_assisted_yaw_positions_at_times,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 """
@@ -56,8 +64,8 @@ gps_data  : latitude, longitude, speed               (Aliv uses these directly �
             unaffected by map-matching; Aliv's own "has the vehicle moved" gate only
             needs a rough fix, not a road-snapped one)
 matched_gps_data : matched_lat, matched_lon, osm_way_id, direction_label,
-            match_raw_distance — used by enrich_events() for reported
-            defect locations/direction, NOT fed into Aliv.
+            match_raw_distance, is_estimated — used by enrich_events() for
+            reported defect locations/direction, NOT fed into Aliv.
 
 Aliv time output
 ────────────────
@@ -461,10 +469,27 @@ def merge_gps_into_imu(imu_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFra
         gps_df[[
             "timestamp_ms", "latitude", "longitude", "speed", "bearing",
             "matched_lat", "matched_lon", "osm_way_id", "direction_label",
+            "is_estimated",
         ]],
         on="timestamp_ms",
         direction="nearest",
     )
+
+
+def estimate_gps_positions_from_yaw(imu_rows, gps_df: pd.DataFrame) -> dict:
+    try:
+        imu = convert_gyro_z_with_aliv_orientation(pd.DataFrame(imu_rows))
+        return gps_assisted_yaw_positions_at_times(
+            imu,
+            gps_df,
+            gps_df["timestamp_ms"],
+        )
+    except ValueError as error:
+        print(
+            "[map_matching] GPS-assisted position estimates unavailable: "
+            f"{error}"
+        )
+        return {}
 
 
 def build_aliv_input(df: pd.DataFrame) -> list[dict]:
@@ -590,10 +615,16 @@ def enrich_events(
         first_lat, first_lon = lat_lon[0][0], lat_lon[0][1]
         h3_index = h3lib.latlng_to_cell(first_lat, first_lon, 9)
 
-        dir_counts = subset["direction_label"].dropna().value_counts()
+        metadata_subset = subset
+        if "is_estimated" in metadata_subset.columns:
+            metadata_subset = metadata_subset[
+                ~metadata_subset["is_estimated"].fillna(False)
+            ]
+
+        dir_counts = metadata_subset["direction_label"].dropna().value_counts()
         event_direction = dir_counts.idxmax() if not dir_counts.empty else None
 
-        way_counts = subset["osm_way_id"].dropna().value_counts()
+        way_counts = metadata_subset["osm_way_id"].dropna().value_counts()
         event_way_id = int(way_counts.idxmax()) if not way_counts.empty else None
 
         enriched.append({
@@ -1066,10 +1097,18 @@ def _process_trip_inner(
     if not already_processed and len(gps_rows) >= 2:
         _load_map_matcher_for_trace(gps_df)
         gps_df = map_match_trip(gps_df)
+        if gps_df["osm_way_id"].isna().any():
+            estimated_positions = estimate_gps_positions_from_yaw(
+                imu_rows,
+                gps_df,
+            )
+        else:
+            estimated_positions = {}
+        gps_df = apply_estimated_positions(gps_df, estimated_positions)
 
         matched_records = gps_df[[
             "timestamp_ms", "matched_lat", "matched_lon", "osm_way_id",
-            "direction_label", "match_raw_distance",
+            "direction_label", "match_raw_distance", "is_estimated",
         ]].to_dict(orient="records")
         matched_records = [sanitize_for_json(row) for row in matched_records]
 
@@ -1079,14 +1118,20 @@ def _process_trip_inner(
             and row.get("matched_lon") is not None
             for row in matched_records
         )
-        if is_test_target and has_accepted_match:
+        has_usable_positions = has_accepted_match or any(
+            row.get("is_estimated")
+            and row.get("matched_lat") is not None
+            and row.get("matched_lon") is not None
+            for row in matched_records
+        )
+        if is_test_target and has_usable_positions:
             target_vehicle_id = _ensure_test_target_session(
                 supabase_source, supabase_target, session_id
             )
             test_session_exists = True
             _set_test_db_processed(supabase_source, session_id, True)
 
-        if has_accepted_match:
+        if has_usable_positions:
             for row in matched_records:
                 row["session_id"] = session_id
             try:

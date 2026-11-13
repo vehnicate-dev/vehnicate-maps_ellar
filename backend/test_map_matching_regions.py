@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import map_matching
+import pandas as pd
 
 
 class CombinedRoadGraphTests(unittest.TestCase):
@@ -73,6 +74,50 @@ class CombinedRoadGraphTests(unittest.TestCase):
                 )
         finally:
             map_matching._EDGE_TO_WAY = old_edge_to_way
+
+
+class EstimatedPositionTests(unittest.TestCase):
+    def test_estimates_only_unmatched_fixes_and_keeps_them_unassociated(self):
+        gps = pd.DataFrame([
+            {
+                "timestamp_ms": 1000,
+                "matched_lat": 11.0,
+                "matched_lon": 77.0,
+                "osm_way_id": 7,
+                "direction_label": "forward",
+                "match_raw_distance": 5.0,
+            },
+            {
+                "timestamp_ms": 2000,
+                "matched_lat": 11.01,
+                "matched_lon": 77.01,
+                "osm_way_id": None,
+                "direction_label": None,
+                "match_raw_distance": None,
+            },
+            {
+                "timestamp_ms": 3000,
+                "matched_lat": 11.02,
+                "matched_lon": 77.02,
+                "osm_way_id": None,
+                "direction_label": None,
+                "match_raw_distance": None,
+            },
+        ])
+
+        result = map_matching.apply_estimated_positions(
+            gps,
+            {1000.0: (11.001, 77.001), 2000.0: (11.011, 77.011)},
+        )
+
+        self.assertEqual(result.loc[0, "matched_lat"], 11.0)
+        self.assertFalse(result.loc[0, "is_estimated"])
+        self.assertEqual(result.loc[1, "matched_lat"], 11.011)
+        self.assertTrue(result.loc[1, "is_estimated"])
+        self.assertTrue(pd.isna(result.loc[1, "osm_way_id"]))
+        self.assertIsNone(result.loc[1, "direction_label"])
+        self.assertEqual(result.loc[2, "matched_lat"], 11.02)
+        self.assertFalse(result.loc[2, "is_estimated"])
 
 
 if __name__ == "__main__":

@@ -16,6 +16,21 @@ from map_regions import (
 
 
 class RegionSelectionTests(unittest.TestCase):
+    def test_uses_supplied_bounds_for_tamil_nadu_regions(self):
+        bounds_by_region = {
+            region.region_id: region.bounds
+            for region in ROAD_REGIONS
+            if region.region_id in {"coimbatore", "tiruppur", "dindigul"}
+        }
+        self.assertEqual(
+            bounds_by_region,
+            {
+                "coimbatore": (76.900, 10.900, 77.100, 11.200),
+                "tiruppur": (77.048, 10.231, 77.892, 11.351),
+                "dindigul": (77.268, 10.019, 78.338, 10.834),
+            },
+        )
+
     def test_selects_region_for_single_point(self):
         regions = regions_for_trace([(13.05, 80.10)])
         self.assertEqual([region.region_id for region in regions], ["chennai-metro"])

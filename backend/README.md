@@ -34,9 +34,14 @@ uploaded extract coverage, not just a city or district name.
 
 Session and user distance totals are calculated from the selected target
 database's `matched_gps_data` rows, using consecutive fixes with a non-null
-`osm_way_id`. Unmatched fallback coordinates are excluded. Test processing
-reads the test target's rows; production processing reads the production
-target's rows.
+`osm_way_id` or an `is_estimated` GPS-assisted fallback. Estimated fixes are
+kept distinct from road snaps (their `osm_way_id` remains null); they contribute
+to distance and approximate event paths/pass evidence, but do not claim a road
+or direction.
+
+Apply `matched_gps_data_estimated_migration.sql` to both test and production
+target databases before deploying the fallback code. The migration adds
+`is_estimated`, defaulting existing rows to `false`.
 
 PBF files are cached under the system temporary directory by default. Set
 `MAP_CACHE_DIR` to use another writable directory. A Railway restart can clear

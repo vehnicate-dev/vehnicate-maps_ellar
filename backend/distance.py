@@ -27,7 +27,7 @@ def compute_total_distance(gps_df) -> float:
 
 
 def compute_matched_distance(matched_rows) -> float:
-    """Sum consecutive accepted road-matched fixes, ignoring raw fallbacks."""
+    """Sum consecutive road-matched or estimated fixes, ignoring raw fallbacks."""
     df = matched_rows.copy()
     required = {
         "timestamp_ms",
@@ -42,16 +42,23 @@ def compute_matched_distance(matched_rows) -> float:
             + ", ".join(sorted(missing))
         )
 
+    if "is_estimated" not in df.columns:
+        df["is_estimated"] = False
+    else:
+        df["is_estimated"] = df["is_estimated"].fillna(False).astype(bool)
+
     df = df.sort_values("timestamp_ms")
     total = 0.0
     previous_point = None
     for row in df.itertuples(index=False):
+        is_estimated = bool(row.is_estimated)
+        has_road_match = False
         try:
             way_id = float(row.osm_way_id)
+            has_road_match = math.isfinite(way_id)
         except (TypeError, ValueError):
-            previous_point = None
-            continue
-        if not math.isfinite(way_id):
+            pass
+        if not has_road_match and not is_estimated:
             previous_point = None
             continue
         try:

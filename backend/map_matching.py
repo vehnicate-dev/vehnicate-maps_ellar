@@ -1002,6 +1002,7 @@ def map_match_trip(
 
         return gps_df
 
+
     # -----------------------------------------------------------------------
     # IMPORTANT:
     #
@@ -1299,4 +1300,54 @@ def map_match_trip(
             f"last_idx={last_idx}"
         )
 
+    return gps_df
+
+
+def apply_estimated_positions(
+    gps_df: pd.DataFrame,
+    estimates_by_timestamp: dict[float, tuple[float, float]],
+) -> pd.DataFrame:
+    """Fill unmatched fixes from a GPS-assisted trajectory without inventing road IDs."""
+    gps_df = gps_df.copy()
+    gps_df["is_estimated"] = False
+
+    estimated_count = 0
+    for index, row in gps_df.iterrows():
+        if pd.notna(row.get("osm_way_id")):
+            continue
+
+        try:
+            timestamp = float(row["timestamp_ms"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(timestamp):
+            continue
+
+        estimate = estimates_by_timestamp.get(timestamp)
+        if estimate is None:
+            continue
+
+        latitude, longitude = map(float, estimate)
+        if (
+            not math.isfinite(latitude)
+            or not math.isfinite(longitude)
+            or not -90 <= latitude <= 90
+            or not -180 <= longitude <= 180
+        ):
+            raise ValueError(
+                f"Invalid estimated GPS coordinate at timestamp {timestamp}."
+            )
+
+        gps_df.at[index, "matched_lat"] = latitude
+        gps_df.at[index, "matched_lon"] = longitude
+        gps_df.at[index, "direction_label"] = None
+        gps_df.at[index, "match_raw_distance"] = None
+        gps_df.at[index, "is_estimated"] = True
+        estimated_count += 1
+
+    if estimated_count:
+        print(
+            f"[map_matching] estimated {estimated_count} unmatched fixes "
+            "from the GPS-assisted yaw trajectory"
+        )
     return gps_df
