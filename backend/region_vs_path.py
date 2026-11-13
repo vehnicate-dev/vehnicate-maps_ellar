@@ -96,6 +96,49 @@ def matched_coordinates(matched_rows):
     return matched[["matched_lat", "matched_lon"]].to_numpy(dtype=float).tolist()
 
 
+def estimated_coordinate_segments(matched_rows):
+    matched = pd.DataFrame(matched_rows)
+    required = [
+        "timestamp_ms",
+        "matched_lat",
+        "matched_lon",
+        "is_estimated",
+    ]
+    missing = [column for column in required if column not in matched.columns]
+    if missing:
+        raise ValueError(
+            f"matched_gps_data is missing required columns: {', '.join(missing)}"
+        )
+
+    for column in ("timestamp_ms", "matched_lat", "matched_lon"):
+        matched[column] = pd.to_numeric(matched[column], errors="coerce")
+    matched = matched.dropna(subset=["timestamp_ms"])
+    matched = matched.sort_values("timestamp_ms", kind="stable")
+    matched = matched.drop_duplicates("timestamp_ms", keep="first")
+
+    segments = []
+    current_segment = []
+    for row in matched.itertuples(index=False):
+        if (
+            pd.isna(row.matched_lat)
+            or pd.isna(row.matched_lon)
+            or pd.isna(row.is_estimated)
+            or not bool(row.is_estimated)
+        ):
+            if current_segment:
+                segments.append(current_segment)
+                current_segment = []
+            continue
+
+        current_segment.append(
+            [float(row.matched_lat), float(row.matched_lon)]
+        )
+
+    if current_segment:
+        segments.append(current_segment)
+    return segments
+
+
 def intersecting_regions(coordinates):
     regions = []
     points = [(longitude, latitude) for latitude, longitude in coordinates]
@@ -118,6 +161,7 @@ def create_region_path_map(
     regions,
     coverage_error=None,
     yaw_route=None,
+    estimated_route_segments=None,
 ):
     if not raw_coordinates:
         raise ValueError("No raw production GPS points are available to plot.")
@@ -251,6 +295,31 @@ def create_region_path_map(
         bounds_to_fit.extend(yaw_route)
     yaw_group.add_to(route_map)
 
+    estimated_group = folium.FeatureGroup(
+        name="Estimated GPS fallback",
+        show=True,
+    )
+    for segment in estimated_route_segments or []:
+        if len(segment) > 1:
+            folium.PolyLine(
+                segment,
+                color="purple",
+                weight=4,
+                opacity=0.95,
+                dash_array="8, 8",
+                tooltip="Estimated GPS fallback (not map-matched)",
+            ).add_to(estimated_group)
+        elif segment:
+            folium.CircleMarker(
+                segment[0],
+                radius=5,
+                color="purple",
+                fill=True,
+                tooltip="Estimated GPS fallback (not map-matched)",
+            ).add_to(estimated_group)
+        bounds_to_fit.extend(segment)
+    estimated_group.add_to(route_map)
+
     route_map.fit_bounds(bounds_to_fit)
     folium.LayerControl(collapsed=False).add_to(route_map)
     return route_map
@@ -344,14 +413,25 @@ def main():
         target_client,
         "matched_gps_data",
         yaw.sessionid,
+        columns=(
+            "timestamp_ms",
+            "matched_lat",
+            "matched_lon",
+            "osm_way_id",
+            "is_estimated",
+        ),
     )
     matched_route = matched_coordinates(matched_rows) if matched_rows else []
+    estimated_route_segments = (
+        estimated_coordinate_segments(matched_rows) if matched_rows else []
+    )
     route_map = create_region_path_map(
         raw_coordinates,
         matched_route,
         regions,
         coverage_error,
         yaw_route=yaw_route,
+        estimated_route_segments=estimated_route_segments,
     )
 
     output_path = Path(__file__).resolve().parent / "region_vs_path.html"
@@ -360,6 +440,10 @@ def main():
     print(f"Session: {yaw.sessionid}")
     print(f"Raw production GPS points: {len(raw_coordinates)}")
     print(f"Matched test-target GPS points: {len(matched_route)}")
+    print(
+        "Estimated GPS fallback points: "
+        f"{sum(len(segment) for segment in estimated_route_segments)}"
+    )
     print(f"GPS-assisted yaw points: {len(yaw_route)}")
     if coverage_error:
         print(f"Backend coverage result: no regions would be fetched: {coverage_error}")

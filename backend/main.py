@@ -38,7 +38,7 @@ from map_regions import (
 from velocity_jerk import estimate_velocity_jerk
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Header   # added Header
 from geographies import add_session_geographies, backfill_all_geographies
-from yaw import (
+from gps_yaw import (
     convert_gyro_z_with_aliv_orientation,
     gps_assisted_yaw_positions_at_times,
 )
