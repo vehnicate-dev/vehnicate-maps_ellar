@@ -74,11 +74,12 @@ _ACTIVE_PBF_PATHS: tuple[str, ...] = ()
 # MATCHER SETTINGS
 # ---------------------------------------------------------------------------
 
-# Maximum acceptable raw-GPS -> road distance.
-#
-# This is intentionally 50 m for Vehnicate.
-# Anything farther away is not trusted as a road match.
+# Candidate and projection limit for the initial raw-GPS matching pass.
 MAX_DIST_M = 50.0
+
+# Above this indexed search radius, nearest-road lookup scans the loaded graph
+# so estimated fixes still find a road without imposing a distance cutoff.
+INDEXED_NEAREST_SEARCH_RADIUS_M = 100_000.0
 
 # Expected GPS observation noise.
 OBS_NOISE_M = 10.0
@@ -833,6 +834,8 @@ def init_map_matcher(
 
 def map_match_trip(
     gps_df: pd.DataFrame,
+    max_dist_m: float = MAX_DIST_M,
+    max_projection_distance_m: float | None = MAX_DIST_M,
 ) -> pd.DataFrame:
     """
     Map-match one trip's GPS dataframe.
@@ -845,6 +848,9 @@ def map_match_trip(
     Optional columns:
         speed
         bearing
+    Optional matching controls:
+        max_dist_m
+        max_projection_distance_m
 
     Returns:
         Same dataframe, sorted by timestamp_ms, with:
@@ -866,6 +872,18 @@ def map_match_trip(
     if _MAP_CON is None:
         raise RuntimeError(
             "init_map_matcher() must run before map_match_trip()"
+        )
+    if not math.isfinite(max_dist_m) or max_dist_m <= 0:
+        raise ValueError("max_dist_m must be a positive finite distance.")
+    if (
+        max_projection_distance_m is not None
+        and (
+            not math.isfinite(max_projection_distance_m)
+            or max_projection_distance_m <= 0
+        )
+    ):
+        raise ValueError(
+            "max_projection_distance_m must be positive and finite, or None."
         )
 
     # -----------------------------------------------------------------------
@@ -966,8 +984,8 @@ def map_match_trip(
     matcher = DistanceMatcher(
         _MAP_CON,
 
-        max_dist=MAX_DIST_M,
-        max_dist_init=MAX_DIST_M,
+        max_dist=max_dist_m,
+        max_dist_init=max_dist_m,
 
         obs_noise=OBS_NOISE_M,
         obs_noise_ne=OBS_NOISE_NE_M,
@@ -1172,26 +1190,30 @@ def map_match_trip(
             continue
 
         # ---------------------------------------------------------------
-        # HARD SAFETY CHECK
+        # Optional projection-distance safety check
         # ---------------------------------------------------------------
         #
         # This is independent of the library's HMM state.
         #
-        # If the actual raw-GPS -> road projection is > 50 m,
-        # DO NOT allow that road match into downstream processing.
+        # The strict raw-GPS pass rejects distant projections. The
+        # estimated-route pass can disable this check after nearest-road
+        # candidates have been found across the loaded graph.
         # ---------------------------------------------------------------
 
         if not math.isfinite(dist_m):
             rejected_too_far += 1
             continue
 
-        if dist_m > MAX_DIST_M:
+        if (
+            max_projection_distance_m is not None
+            and dist_m > max_projection_distance_m
+        ):
             rejected_too_far += 1
 
             print(
                 f"[map_matching] rejected obs={obs_idx}: "
                 f"projection distance={dist_m:.1f}m "
-                f"> {MAX_DIST_M:.1f}m"
+                f"> {max_projection_distance_m:.1f}m"
             )
 
             continue
@@ -1353,8 +1375,156 @@ def apply_estimated_positions(
     return gps_df
 
 
+def _choose_nearest_road_candidate(candidates, bearing):
+    candidates_with_way = [
+        candidate
+        for candidate in candidates
+        if _EDGE_TO_WAY.get((candidate[1], candidate[3])) is not None
+    ]
+    if not candidates_with_way:
+        return None
+
+    nearest_distance = min(candidate[0] for candidate in candidates_with_way)
+    nearest_candidates = [
+        candidate
+        for candidate in candidates_with_way
+        if candidate[0] <= nearest_distance + 0.01
+    ]
+    if bearing is None:
+        selected = nearest_candidates[0]
+    else:
+        selected = min(
+            nearest_candidates,
+            key=lambda candidate: (
+                _circular_diff_deg(
+                    _bearing_deg(
+                        candidate[2][0],
+                        candidate[2][1],
+                        candidate[4][0],
+                        candidate[4][1],
+                    ),
+                    bearing,
+                ),
+                candidate[0],
+            ),
+        )
+    way_id, direction = _EDGE_TO_WAY[(selected[1], selected[3])]
+    return selected, way_id, direction
+
+
+def _scan_nearest_road_candidate(location, bearing):
+    nearest_distance = math.inf
+    nearest_candidates = []
+    for node1, (location1, neighbors) in _MAP_CON.graph.items():
+        for node2 in neighbors:
+            if node1 == node2 or (node1, node2) not in _EDGE_TO_WAY:
+                continue
+            location2 = _MAP_CON.node_coordinates(node2)
+            distance, projection, fraction = _MAP_CON.distance_point_to_segment(
+                location,
+                location1,
+                location2,
+            )
+            if not math.isfinite(distance):
+                continue
+            candidate = (
+                distance,
+                node1,
+                location1,
+                node2,
+                location2,
+                projection,
+                fraction,
+            )
+            if distance < nearest_distance:
+                nearest_distance = distance
+                nearest_candidates = [
+                    existing
+                    for existing in nearest_candidates
+                    if existing[0] <= nearest_distance + 0.01
+                ]
+                nearest_candidates.append(candidate)
+            elif (
+                distance <= nearest_distance + 0.01
+                and len(nearest_candidates) < 32
+            ):
+                nearest_candidates.append(candidate)
+
+    return _choose_nearest_road_candidate(nearest_candidates, bearing)
+
+
+def _nearest_road_candidate(location, bearing):
+    if _MAP_CON is None:
+        raise RuntimeError(
+            "init_map_matcher() must run before estimated positions are matched."
+        )
+
+    search_radius = MAX_DIST_M
+    while search_radius <= INDEXED_NEAREST_SEARCH_RADIUS_M:
+        nearby_edges = _MAP_CON.edges_closeto(
+            location,
+            max_dist=search_radius,
+            max_elmt=MAX_LATTICE_WIDTH * 2,
+        )
+        selected = _choose_nearest_road_candidate(nearby_edges, bearing)
+        if selected is not None:
+            return selected
+        search_radius *= 2
+
+    selected = _scan_nearest_road_candidate(location, bearing)
+    if selected is None:
+        raise RuntimeError(
+            "The loaded OSM graph contains no directed road edges for "
+            "estimated-position matching."
+        )
+    return selected
+
+
+def _estimated_route_bearing(route, index):
+    speed = route["speed"].iat[index] if "speed" in route.columns else None
+    raw_bearing = (
+        route["bearing"].iat[index] if "bearing" in route.columns else None
+    )
+    try:
+        speed = float(speed)
+        raw_bearing = float(raw_bearing)
+    except (TypeError, ValueError):
+        speed = 0.0
+        raw_bearing = math.nan
+
+    if (
+        math.isfinite(speed)
+        and speed >= BEARING_TRUST_SPEED_MPS
+        and math.isfinite(raw_bearing)
+    ):
+        return raw_bearing % 360.0
+
+    if index > 0 and index + 1 < len(route):
+        return _bearing_deg(
+            route["latitude"].iat[index - 1],
+            route["longitude"].iat[index - 1],
+            route["latitude"].iat[index + 1],
+            route["longitude"].iat[index + 1],
+        )
+    if index + 1 < len(route):
+        return _bearing_deg(
+            route["latitude"].iat[index],
+            route["longitude"].iat[index],
+            route["latitude"].iat[index + 1],
+            route["longitude"].iat[index + 1],
+        )
+    if index > 0:
+        return _bearing_deg(
+            route["latitude"].iat[index - 1],
+            route["longitude"].iat[index - 1],
+            route["latitude"].iat[index],
+            route["longitude"].iat[index],
+        )
+    return None
+
+
 def map_match_estimated_positions(gps_df: pd.DataFrame) -> pd.DataFrame:
-    """Snap estimated fixes to OSM using matched fixes as route context."""
+    """Match estimates along the route, then use each nearest road as fallback."""
     required = [
         "timestamp_ms",
         "latitude",
@@ -1386,18 +1556,49 @@ def map_match_estimated_positions(gps_df: pd.DataFrame) -> pd.DataFrame:
         use_matched_positions, ["matched_lat", "matched_lon"]
     ].to_numpy()
 
-    rematched = map_match_trip(route).set_index("map_match_source_index")
-    rematched_count = 0
+    nearest_candidates = {}
+    nearest_distances = []
     for index in result.index[estimates_to_match]:
-        if index not in rematched.index:
-            continue
+        location = (
+            float(route.at[index, "latitude"]),
+            float(route.at[index, "longitude"]),
+        )
+        bearing = _estimated_route_bearing(route, index)
+        nearest = _nearest_road_candidate(location, bearing)
+        nearest_candidates[index] = nearest
+        nearest_distances.append(float(nearest[0][0]))
 
-        match = rematched.loc[index]
-        if pd.isna(match["osm_way_id"]):
-            continue
+    search_distance_m = max(MAX_DIST_M, max(nearest_distances) + 1e-3)
+    print(
+        "[map_matching] nearest-road distances for estimates: "
+        f"min={min(nearest_distances):.1f}m, "
+        f"median={pd.Series(nearest_distances).median():.1f}m, "
+        f"max={max(nearest_distances):.1f}m; "
+        f"route matcher search radius={search_distance_m:.1f}m"
+    )
 
-        latitude = float(match["matched_lat"])
-        longitude = float(match["matched_lon"])
+    rematched = map_match_trip(
+        route,
+        max_dist_m=search_distance_m,
+        max_projection_distance_m=None,
+    ).set_index("map_match_source_index")
+    rematched_count = 0
+    nearest_fallback_count = 0
+    for index in result.index[estimates_to_match]:
+        match = rematched.loc[index] if index in rematched.index else None
+        if match is not None and pd.notna(match["osm_way_id"]):
+            latitude = float(match["matched_lat"])
+            longitude = float(match["matched_lon"])
+            way_id = match["osm_way_id"]
+            direction = match["direction_label"]
+            raw_distance = match["match_raw_distance"]
+            rematched_count += 1
+        else:
+            candidate, way_id, direction = nearest_candidates[index]
+            latitude, longitude = candidate[5]
+            raw_distance = candidate[0]
+            nearest_fallback_count += 1
+
         if (
             not math.isfinite(latitude)
             or not math.isfinite(longitude)
@@ -1409,19 +1610,21 @@ def map_match_estimated_positions(gps_df: pd.DataFrame) -> pd.DataFrame:
                 f"{result.at[index, 'timestamp_ms']}."
             )
 
-        for column in (
-            "matched_lat",
-            "matched_lon",
-            "osm_way_id",
-            "direction_label",
-            "match_raw_distance",
-        ):
-            result.at[index, column] = match[column]
-        rematched_count += 1
+        matched_values = {
+            "matched_lat": latitude,
+            "matched_lon": longitude,
+            "osm_way_id": way_id,
+            "direction_label": direction,
+            "match_raw_distance": raw_distance,
+        }
+        for column, value in matched_values.items():
+            result.at[index, column] = value
 
     print(
-        f"[map_matching] road-matched {rematched_count}/"
-        f"{int(estimates_to_match.sum())} estimated fixes; "
-        "unmatched estimates retain their GPS-assisted fallback coordinates"
+        f"[map_matching] assigned OSM roads to "
+        f"{rematched_count + nearest_fallback_count}/"
+        f"{int(estimates_to_match.sum())} estimated fixes "
+        f"(route continuity={rematched_count}, "
+        f"nearest-road fallback={nearest_fallback_count})"
     )
     return result
