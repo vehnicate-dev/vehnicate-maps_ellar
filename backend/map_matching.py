@@ -68,6 +68,7 @@ from leuvenmapmatching.matcher.distance import DistanceMatcher
 
 _MAP_CON: Optional[InMemMap] = None
 _ACTIVE_PBF_PATHS: tuple[str, ...] = ()
+_INDEXED_NEAREST_SEARCH_BROKEN = False
 
 
 # ---------------------------------------------------------------------------
@@ -796,7 +797,7 @@ def init_map_matcher(
     consecutively. Trip processing is serialized by the backend worker.
     """
 
-    global _MAP_CON, _ACTIVE_PBF_PATHS
+    global _MAP_CON, _ACTIVE_PBF_PATHS, _INDEXED_NEAREST_SEARCH_BROKEN
 
     paths = [osm_pbf_paths] if isinstance(osm_pbf_paths, str) else list(osm_pbf_paths)
     if not paths:
@@ -821,6 +822,7 @@ def init_map_matcher(
 
     _MAP_CON = _build_map_from_pbf(paths)
     _ACTIVE_PBF_PATHS = normalized_paths
+    _INDEXED_NEAREST_SEARCH_BROKEN = False
 
     print(
         f"[map_matching] loaded combined graph from "
@@ -1454,22 +1456,32 @@ def _scan_nearest_road_candidate(location, bearing):
 
 
 def _nearest_road_candidate(location, bearing):
+    global _INDEXED_NEAREST_SEARCH_BROKEN
+
     if _MAP_CON is None:
         raise RuntimeError(
             "init_map_matcher() must run before estimated positions are matched."
         )
 
-    search_radius = MAX_DIST_M
-    while search_radius <= INDEXED_NEAREST_SEARCH_RADIUS_M:
-        nearby_edges = _MAP_CON.edges_closeto(
-            location,
-            max_dist=search_radius,
-            max_elmt=MAX_LATTICE_WIDTH * 2,
-        )
-        selected = _choose_nearest_road_candidate(nearby_edges, bearing)
-        if selected is not None:
-            return selected
-        search_radius *= 2
+    if not _INDEXED_NEAREST_SEARCH_BROKEN:
+        search_radius = MAX_DIST_M
+        try:
+            while search_radius <= INDEXED_NEAREST_SEARCH_RADIUS_M:
+                nearby_edges = _MAP_CON.edges_closeto(
+                    location,
+                    max_dist=search_radius,
+                    max_elmt=MAX_LATTICE_WIDTH * 2,
+                )
+                selected = _choose_nearest_road_candidate(nearby_edges, bearing)
+                if selected is not None:
+                    return selected
+                search_radius *= 2
+        except KeyError as err:
+            _INDEXED_NEAREST_SEARCH_BROKEN = True
+            print(
+                "[map_matching] indexed nearest-road search failed with "
+                f"{err!r}; disabling it for this graph and scanning edges"
+            )
 
     selected = _scan_nearest_road_candidate(location, bearing)
     if selected is None:
