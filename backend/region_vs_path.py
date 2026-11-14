@@ -77,9 +77,83 @@ def fetch_session_rows(
     return rows
 
 
+def fetch_matched_rows_from_targets(session_id):
+    targets = []
+    production_url = os.environ.get(
+        "TARGET_PRODUCTION_URL", os.environ.get("TARGET_URL")
+    )
+    production_key = os.environ.get(
+        "TARGET_PRODUCTION_KEY", os.environ.get("TARGET_KEY")
+    )
+    test_url = os.environ.get("TARGET_TEST_URL")
+    test_key = os.environ.get("TARGET_TEST_KEY")
+
+    for target_name, url, key in (
+        ("production", production_url, production_key),
+        ("test", test_url, test_key),
+    ):
+        if bool(url) != bool(key):
+            raise RuntimeError(
+                f"Configure both target URL and key for the {target_name} database."
+            )
+        if url and key:
+            targets.append((target_name, create_client(url, key)))
+
+    if not targets:
+        raise RuntimeError(
+            "Set TARGET_PRODUCTION_URL and TARGET_PRODUCTION_KEY "
+            "(or TARGET_URL and TARGET_KEY), or configure TARGET_TEST_URL "
+            "and TARGET_TEST_KEY to read matched_gps_data."
+        )
+
+    rows_by_target = []
+    for target_name, target_client in targets:
+        rows = fetch_session_rows(
+            target_client,
+            "matched_gps_data",
+            session_id,
+            columns=(
+                "timestamp_ms",
+                "matched_lat",
+                "matched_lon",
+                "osm_way_id",
+                "is_estimated",
+            ),
+        )
+        if rows:
+            rows_by_target.append((target_name, rows))
+            stored_estimates = pd.DataFrame(rows)
+            map_matched_estimates = stored_estimates[
+                stored_estimates["is_estimated"].fillna(False).astype(bool)
+                & stored_estimates["osm_way_id"].notna()
+            ]
+            if not map_matched_estimates.empty:
+                print(
+                    f"Reading matched GPS rows from the {target_name} target."
+                )
+                return rows
+
+    if rows_by_target:
+        target_name, rows = rows_by_target[0]
+        print(
+            f"No map-matched estimates found; using GPS rows from the "
+            f"{target_name} target."
+        )
+        return rows
+
+    print("No matched GPS rows found in the configured processing targets.")
+    return []
+
+
 def matched_coordinates(matched_rows):
     matched = pd.DataFrame(matched_rows)
-    required = ["timestamp_ms", "matched_lat", "matched_lon", "osm_way_id"]
+    required = [
+        "timestamp_ms",
+        "matched_lat",
+        "matched_lon",
+        "osm_way_id",
+        "is_estimated",
+    ]
     missing = [column for column in required if column not in matched.columns]
     if missing:
         raise ValueError(
@@ -91,6 +165,7 @@ def matched_coordinates(matched_rows):
     matched = matched.dropna(
         subset=["timestamp_ms", "matched_lat", "matched_lon", "osm_way_id"]
     )
+    matched = matched[~matched["is_estimated"].fillna(False).astype(bool)]
     matched = matched.sort_values("timestamp_ms", kind="stable")
     matched = matched.drop_duplicates("timestamp_ms", keep="first")
     return matched[["matched_lat", "matched_lon"]].to_numpy(dtype=float).tolist()
@@ -102,6 +177,7 @@ def estimated_coordinate_segments(matched_rows):
         "timestamp_ms",
         "matched_lat",
         "matched_lon",
+        "osm_way_id",
         "is_estimated",
     ]
     missing = [column for column in required if column not in matched.columns]
@@ -122,6 +198,7 @@ def estimated_coordinate_segments(matched_rows):
         if (
             pd.isna(row.matched_lat)
             or pd.isna(row.matched_lon)
+            or pd.isna(row.osm_way_id)
             or pd.isna(row.is_estimated)
             or not bool(row.is_estimated)
         ):
@@ -201,8 +278,8 @@ def create_region_path_map(
             raw_coordinates[0],
             tooltip="Map coverage incomplete",
             popup=(
-                "The backend would not download any regions for this session "
-                "because route coverage is incomplete.<br><br>"
+                "The estimated route cannot be map-matched because route "
+                "coverage is incomplete.<br><br>"
                 f"{coverage_error}"
             ),
             icon=folium.Icon(color="red", icon="warning-sign"),
@@ -278,7 +355,7 @@ def create_region_path_map(
             color="blue",
             weight=4,
             opacity=0.9,
-            tooltip="Matched GPS route (test target)",
+            tooltip="Map-matched GPS route (processing target)",
         ).add_to(matched_group)
         bounds_to_fit.extend(matched_route)
     matched_group.add_to(route_map)
@@ -295,10 +372,7 @@ def create_region_path_map(
         bounds_to_fit.extend(yaw_route)
     yaw_group.add_to(route_map)
 
-    estimated_group = folium.FeatureGroup(
-        name="Estimated GPS fallback",
-        show=True,
-    )
+    estimated_group = folium.FeatureGroup(name="Map-matched estimated route", show=True)
     for segment in estimated_route_segments or []:
         if len(segment) > 1:
             folium.PolyLine(
@@ -307,7 +381,7 @@ def create_region_path_map(
                 weight=4,
                 opacity=0.95,
                 dash_array="8, 8",
-                tooltip="Estimated GPS fallback (not map-matched)",
+                tooltip="Estimated GPS route matched to OSM using route continuity",
             ).add_to(estimated_group)
         elif segment:
             folium.CircleMarker(
@@ -315,7 +389,7 @@ def create_region_path_map(
                 radius=5,
                 color="purple",
                 fill=True,
-                tooltip="Estimated GPS fallback (not map-matched)",
+                tooltip="Estimated GPS route matched to OSM using route continuity",
             ).add_to(estimated_group)
         bounds_to_fit.extend(segment)
     estimated_group.add_to(route_map)
@@ -336,21 +410,13 @@ def main():
     source_key = os.environ.get(
         "SOURCE_PRODUCTION_KEY", os.environ.get("SOURCE_KEY")
     )
-    target_url = os.environ.get("TARGET_TEST_URL")
-    target_key = os.environ.get("TARGET_TEST_KEY")
     if not source_url or not source_key:
         raise RuntimeError(
             "Set SOURCE_PRODUCTION_URL and SOURCE_PRODUCTION_KEY "
             "(or SOURCE_URL and SOURCE_KEY) in the environment or backend .env."
         )
-    if not target_url or not target_key:
-        raise RuntimeError(
-            "Set TARGET_TEST_URL and TARGET_TEST_KEY in the environment "
-            "or backend .env."
-        )
 
     source_client = create_client(source_url, source_key)
-    target_client = create_client(target_url, target_key)
     raw_rows = fetch_session_rows(
         source_client,
         "gps_data",
@@ -409,18 +475,7 @@ def main():
         regions = intersecting_regions(raw_coordinates)
         coverage_error = str(error)
 
-    matched_rows = fetch_session_rows(
-        target_client,
-        "matched_gps_data",
-        yaw.sessionid,
-        columns=(
-            "timestamp_ms",
-            "matched_lat",
-            "matched_lon",
-            "osm_way_id",
-            "is_estimated",
-        ),
-    )
+    matched_rows = fetch_matched_rows_from_targets(yaw.sessionid)
     matched_route = matched_coordinates(matched_rows) if matched_rows else []
     estimated_route_segments = (
         estimated_coordinate_segments(matched_rows) if matched_rows else []
@@ -439,9 +494,9 @@ def main():
     print(f"Saved region and route map: {output_path}")
     print(f"Session: {yaw.sessionid}")
     print(f"Raw production GPS points: {len(raw_coordinates)}")
-    print(f"Matched test-target GPS points: {len(matched_route)}")
+    print(f"Map-matched processing-target GPS points: {len(matched_route)}")
     print(
-        "Estimated GPS fallback points: "
+        "Map-matched estimated GPS points: "
         f"{sum(len(segment) for segment in estimated_route_segments)}"
     )
     print(f"GPS-assisted yaw points: {len(yaw_route)}")

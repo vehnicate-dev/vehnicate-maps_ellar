@@ -1307,7 +1307,7 @@ def apply_estimated_positions(
     gps_df: pd.DataFrame,
     estimates_by_timestamp: dict[float, tuple[float, float]],
 ) -> pd.DataFrame:
-    """Fill unmatched fixes from a GPS-assisted trajectory without inventing road IDs."""
+    """Fill unmatched fixes from a GPS-assisted trajectory as provisional fallbacks."""
     gps_df = gps_df.copy()
     gps_df["is_estimated"] = False
 
@@ -1351,3 +1351,77 @@ def apply_estimated_positions(
             "from the GPS-assisted yaw trajectory"
         )
     return gps_df
+
+
+def map_match_estimated_positions(gps_df: pd.DataFrame) -> pd.DataFrame:
+    """Snap estimated fixes to OSM using matched fixes as route context."""
+    required = [
+        "timestamp_ms",
+        "latitude",
+        "longitude",
+        "matched_lat",
+        "matched_lon",
+        "osm_way_id",
+        "is_estimated",
+    ]
+    missing = [column for column in required if column not in gps_df.columns]
+    if missing:
+        raise ValueError(
+            f"GPS dataframe is missing required columns: {', '.join(missing)}"
+        )
+
+    result = gps_df.copy().reset_index(drop=True)
+    estimated = result["is_estimated"].fillna(False).astype(bool)
+    has_coordinates = result["matched_lat"].notna() & result["matched_lon"].notna()
+    estimates_to_match = estimated & has_coordinates
+    if not estimates_to_match.any():
+        return result
+
+    route = result.copy()
+    route["map_match_source_index"] = range(len(route))
+    use_matched_positions = has_coordinates & (
+        estimated | result["osm_way_id"].notna()
+    )
+    route.loc[use_matched_positions, ["latitude", "longitude"]] = route.loc[
+        use_matched_positions, ["matched_lat", "matched_lon"]
+    ].to_numpy()
+
+    rematched = map_match_trip(route).set_index("map_match_source_index")
+    rematched_count = 0
+    for index in result.index[estimates_to_match]:
+        if index not in rematched.index:
+            continue
+
+        match = rematched.loc[index]
+        if pd.isna(match["osm_way_id"]):
+            continue
+
+        latitude = float(match["matched_lat"])
+        longitude = float(match["matched_lon"])
+        if (
+            not math.isfinite(latitude)
+            or not math.isfinite(longitude)
+            or not -90 <= latitude <= 90
+            or not -180 <= longitude <= 180
+        ):
+            raise ValueError(
+                f"Invalid map-matched estimate at timestamp "
+                f"{result.at[index, 'timestamp_ms']}."
+            )
+
+        for column in (
+            "matched_lat",
+            "matched_lon",
+            "osm_way_id",
+            "direction_label",
+            "match_raw_distance",
+        ):
+            result.at[index, column] = match[column]
+        rematched_count += 1
+
+    print(
+        f"[map_matching] road-matched {rematched_count}/"
+        f"{int(estimates_to_match.sum())} estimated fixes; "
+        "unmatched estimates retain their GPS-assisted fallback coordinates"
+    )
+    return result

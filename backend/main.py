@@ -27,6 +27,7 @@ from distance import compute_matched_distance
 from map_matching import (
     apply_estimated_positions,
     init_map_matcher,
+    map_match_estimated_positions,
     map_match_trip,
 )
 from map_regions import (
@@ -1105,6 +1106,7 @@ def _process_trip_inner(
         else:
             estimated_positions = {}
         gps_df = apply_estimated_positions(gps_df, estimated_positions)
+        gps_df = map_match_estimated_positions(gps_df)
 
         matched_records = gps_df[[
             "timestamp_ms", "matched_lat", "matched_lon", "osm_way_id",

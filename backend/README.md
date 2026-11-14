@@ -34,10 +34,17 @@ uploaded extract coverage, not just a city or district name.
 
 Session and user distance totals are calculated from the selected target
 database's `matched_gps_data` rows, using consecutive fixes with a non-null
-`osm_way_id` or an `is_estimated` GPS-assisted fallback. Estimated fixes are
-kept distinct from road snaps (their `osm_way_id` remains null); they contribute
-to distance and approximate event paths/pass evidence, but do not claim a road
-or direction.
+`osm_way_id` or an `is_estimated` GPS-assisted fallback. After filling
+unmatched fixes from the speed-derived GPS-assisted trajectory, the backend
+map-matches estimates in the context of the complete route and its accepted
+road matches. Successful estimated snaps retain `is_estimated=true` and store
+their OSM way, direction, and matched coordinates; estimates that cannot be
+matched retain their fallback coordinates without claiming a road or direction.
+
+The `region_vs_path.py` diagnostic page reads `matched_gps_data` from the
+production target (falling back to the test target when the session has no
+production rows) and plots the stored, successfully map-matched estimates in a
+separate layer.
 
 Apply `matched_gps_data_estimated_migration.sql` to both test and production
 target databases before deploying the fallback code. The migration adds
