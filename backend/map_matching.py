@@ -348,7 +348,8 @@ def _build_map_from_pbf(osm_pbf_paths: list[str]) -> InMemMap:
             (way_id, direction),
         )
 
-    map_con.purge()
+    # Keep one-way road endpoints: purge() removes nodes with no outgoing
+    # edges even when another node still references them as an edge endpoint.
 
     _EDGE_TO_WAY = edge_to_way
 
@@ -1417,11 +1418,16 @@ def _choose_nearest_road_candidate(candidates, bearing):
 def _scan_nearest_road_candidate(location, bearing):
     nearest_distance = math.inf
     nearest_candidates = []
+    dangling_edges = 0
     for node1, (location1, neighbors) in _MAP_CON.graph.items():
         for node2 in neighbors:
             if node1 == node2 or (node1, node2) not in _EDGE_TO_WAY:
                 continue
-            location2 = _MAP_CON.node_coordinates(node2)
+            node2_data = _MAP_CON.graph.get(node2)
+            if node2_data is None or node2_data[0] is None:
+                dangling_edges += 1
+                continue
+            location2 = node2_data[0]
             distance, projection, fraction = _MAP_CON.distance_point_to_segment(
                 location,
                 location1,
@@ -1451,6 +1457,12 @@ def _scan_nearest_road_candidate(location, bearing):
                 and len(nearest_candidates) < 32
             ):
                 nearest_candidates.append(candidate)
+
+    if dangling_edges:
+        print(
+            "[map_matching] nearest-road scan skipped "
+            f"{dangling_edges} dangling directed edges"
+        )
 
     return _choose_nearest_road_candidate(nearest_candidates, bearing)
 
