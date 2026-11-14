@@ -121,6 +121,8 @@ GRAVITY_LOWPASS_WINDOW_S  = 1.5   # rolling window used to separate gravity from
 MIN_COHERENCE = 0.1  # su,sv vector magnitude / energy — below this, the direction estimate is noise-dominated
 MIN_GPS_POINTS = 10  # fewer raw fixes than this → skip Aliv (matched distance is still calculated)
 MIN_TRIP_DISTANCE_M = 50  # trips that moved less than this overall aren't worth map-matching/Aliv
+# Prevent vehicle-distance triggers from underflowing below zero during replay resets.
+REPLAY_DISTANCE_ROUNDING_BUFFER_KM = 1e-6
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -1509,6 +1511,27 @@ def _replay_all_sessions_inner(target_role: str) -> None:
             _execute_with_retry(supabase_target.rpc("reset_pipeline", {}))
             _delete_all_rows(supabase_target, "matched_gps_data", "session_id")
             _delete_all_rows(supabase_target, "geographies", "key")
+
+            vehicle_rows = fetch_all_pages(
+                supabase_target,
+                table="vehicle_details",
+                filters=[],
+                order_col="vehicleid",
+            )
+            for vehicle in vehicle_rows:
+                distance = vehicle.get("distance")
+                if distance is None:
+                    continue
+                _execute_with_retry(
+                    supabase_target.table("vehicle_details")
+                    .update({
+                        "distance": (
+                            float(distance) + REPLAY_DISTANCE_ROUNDING_BUFFER_KM
+                        )
+                    })
+                    .eq("vehicleid", vehicle["vehicleid"])
+                )
+
             _execute_with_retry(
                 supabase_target.table("sessions")
                 .update({
@@ -1519,6 +1542,11 @@ def _replay_all_sessions_inner(target_role: str) -> None:
                     "imu_only": True,
                 })
                 .not_.is_("session_id", "null")
+            )
+            _execute_with_retry(
+                supabase_target.table("vehicle_details")
+                .update({"distance": 0})
+                .not_.is_("vehicleid", "null")
             )
             _execute_with_retry(
                 supabase_target.table("user_details")
