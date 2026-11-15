@@ -99,7 +99,7 @@ class ReplayMapCoverageTests(unittest.TestCase):
         execute.assert_not_called()
         delete_rows.assert_not_called()
 
-    def test_resume_stops_at_map_failure_for_retry_from_last_checkpoint(self):
+    def test_resume_skips_map_failure_and_continues_to_later_session(self):
         sessions = [
             {
                 "session_id": "uncovered-session",
@@ -121,17 +121,23 @@ class ReplayMapCoverageTests(unittest.TestCase):
             patch.object(
                 main,
                 "_process_trip_inner",
-                side_effect=MapDataUnavailableError("no extract covers this trip"),
+                side_effect=[
+                    MapDataUnavailableError("no extract covers this trip"),
+                    None,
+                ],
             ) as process_trip,
-            patch("builtins.print"),
+            patch("builtins.print") as print_log,
         ):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "resume halted at session=uncovered-session",
-            ):
-                main._process_sessions_in_order(sessions, "production", "resume")
+            main._process_sessions_in_order(sessions, "production", "resume")
 
-        process_trip.assert_called_once()
+        self.assertEqual(process_trip.call_count, 2)
+        self.assertEqual(process_trip.call_args_list[1].args[0], "later-session")
+        self.assertTrue(
+            any(
+                "SKIPPED session=uncovered-session" in str(call)
+                for call in print_log.call_args_list
+            )
+        )
 
 
 if __name__ == "__main__":

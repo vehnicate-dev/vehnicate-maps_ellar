@@ -30,9 +30,9 @@ Each resume endpoint reads the latest target session with
 chronological order. If the target has no completed sessions, it starts with
 the earliest source session. Resume never resets target data and does not scan
 for unprocessed sessions earlier than the latest completed checkpoint. If map
-data is unavailable, resume stops at that session so it can be retried after
-map coverage is fixed. Other processing failures also stop the resume;
-triggering it again continues after the latest completed session.
+data is unavailable, resume logs and skips that session, then continues.
+Other processing failures stop the resume; triggering it again continues after
+the latest completed session.
 Both resume endpoints require the `MAP_QUEUE_API_KEY` value in the
 `X-API-Key` header.
 

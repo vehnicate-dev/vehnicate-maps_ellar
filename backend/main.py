@@ -1590,16 +1590,6 @@ def _process_sessions_in_order(
                 target_role=target_role,
             )
         except MapDataUnavailableError as trip_err:
-            if operation == "resume":
-                print(
-                    f"[resume:{target_role}] HALTED at session={session_id}; "
-                    f"map data is unavailable: {trip_err}"
-                )
-                raise RuntimeError(
-                    f"{target_role} resume halted at session={session_id} "
-                    "because map data is unavailable. Fix map coverage and "
-                    f"trigger resume again: {trip_err}"
-                ) from trip_err
             skipped_map_session_count += 1
             print(
                 f"[{operation}:{target_role}] SKIPPED session={session_id} "
