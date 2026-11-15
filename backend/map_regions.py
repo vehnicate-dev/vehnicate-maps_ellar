@@ -14,16 +14,36 @@ import requests
 class MapDataUnavailableError(RuntimeError):
     """Raised when a trip's complete route cannot be matched with available OSM data."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        gps_point_count: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.gps_point_count = gps_point_count
+
+
+class MapCoverageUnavailableError(MapDataUnavailableError):
+    """Raised when no configured OSM extract covers part of a trip."""
+
 
 @dataclass(frozen=True)
 class RoadRegion:
     region_id: str
     bounds: tuple[float, float, float, float]
     url: str
+    cache_revision: int = 0
 
     @property
     def filename(self) -> str:
         return self.url.rsplit("/", 1)[-1]
+
+    @property
+    def cache_filename(self) -> str:
+        if self.cache_revision == 0:
+            return self.filename
+        return f"{self.region_id}-r{self.cache_revision}.osm.pbf"
 
 
 _STORAGE_PREFIX = (
@@ -45,8 +65,12 @@ ROAD_REGIONS = (
                "https://mmjusghgeedycrrfdejg.supabase.co/storage/v1/object/public/road_networks/chennai.osm.pbf"),
     RoadRegion("chittoor-tirupati", (78.06799, 12.62347, 80.05254, 14.05039),
                "https://mmjusghgeedycrrfdejg.supabase.co/storage/v1/object/public/road_networks/chittoor.osm.pbf"),
-    RoadRegion("coimbatore", (76.900, 10.900, 77.100, 11.200),
-               "https://mmjusghgeedycrrfdejg.supabase.co/storage/v1/object/public/road_networks/coimbatore.osm.pbf"),
+    RoadRegion(
+        "coimbatore",
+        (76.6556, 10.2200, 77.3000, 11.4064),
+        "https://mmjusghgeedycrrfdejg.supabase.co/storage/v1/object/public/road_networks/coimbatore.osm.pbf",
+        cache_revision=2,
+    ),
     RoadRegion("dindigul", (77.268, 10.019, 78.338, 10.834),
                "https://mmjusghgeedycrrfdejg.supabase.co/storage/v1/object/public/road_networks/dindigul.osm.pbf"),
     RoadRegion("kozhikode", (75.53652, 11.12271, 76.14788, 11.80564),
@@ -196,7 +220,7 @@ def regions_for_trace(points) -> list[RoadRegion]:
         selected_ids.update(region.region_id for region in _point_regions(trace[0]))
         if not selected_ids:
             lon, lat = trace[0]
-            raise MapDataUnavailableError(
+            raise MapCoverageUnavailableError(
                 f"No configured OSM extract covers the trip near "
                 f"latitude={lat:.5f}, longitude={lon:.5f}."
             )
@@ -217,7 +241,7 @@ def regions_for_trace(points) -> list[RoadRegion]:
                 if interval_start > covered_until + 1e-9:
                     gap_fraction = (covered_until + interval_start) / 2
                     lon, lat = _coordinate_at(start, end, gap_fraction)
-                    raise MapDataUnavailableError(
+                    raise MapCoverageUnavailableError(
                         f"No configured OSM extract covers the trip near "
                         f"latitude={lat:.5f}, longitude={lon:.5f}."
                     )
@@ -228,7 +252,7 @@ def regions_for_trace(points) -> list[RoadRegion]:
 
             if covered_until < 1.0 - 1e-9:
                 lon, lat = _coordinate_at(start, end, (covered_until + 1) / 2)
-                raise MapDataUnavailableError(
+                raise MapCoverageUnavailableError(
                     f"No configured OSM extract covers the trip near "
                     f"latitude={lat:.5f}, longitude={lon:.5f}."
                 )
@@ -242,7 +266,7 @@ def regions_for_trace(points) -> list[RoadRegion]:
 def ensure_region_extract(region: RoadRegion, cache_dir: str) -> str:
     """Return a cached PBF path, downloading it atomically when necessary."""
     os.makedirs(cache_dir, exist_ok=True)
-    final_path = os.path.join(cache_dir, region.filename)
+    final_path = os.path.join(cache_dir, region.cache_filename)
     if os.path.isfile(final_path) and os.path.getsize(final_path) > 0:
         return final_path
 

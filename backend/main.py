@@ -9,8 +9,10 @@ import queue
 import threading
 import tempfile
 import hmac
+from datetime import datetime
 from functools import wraps
 from contextlib import closing
+from uuid import uuid4
 import httpx
 from supabase import create_client, ClientOptions
 import httpcore
@@ -31,6 +33,7 @@ from map_matching import (
     map_match_trip,
 )
 from map_regions import (
+    MapCoverageUnavailableError,
     MapDataUnavailableError,
     ensure_region_extract,
     register_road_region,
@@ -123,6 +126,7 @@ MIN_GPS_POINTS = 10  # fewer raw fixes than this → skip Aliv (matched distance
 MIN_TRIP_DISTANCE_M = 50  # trips that moved less than this overall aren't worth map-matching/Aliv
 # Prevent vehicle-distance triggers from underflowing below zero during replay resets.
 REPLAY_DISTANCE_ROUNDING_BUFFER_KM = 1e-6
+MAP_COVERAGE_REPLAY_HALT_GPS_POINT_THRESHOLD = 20
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -238,26 +242,74 @@ _SUPABASE_CLIENT_OPTIONS = ClientOptions(
 )
 
 
-def _make_supabase_client(url: str, key: str):
-    return create_client(url, key, options=_SUPABASE_CLIENT_OPTIONS)
+def _make_supabase_client(
+    url: str,
+    key: str,
+    processing_session_id: str | None = None,
+    processing_run_id: str | None = None,
+    processing_target: str | None = None,
+):
+    headers = {}
+    if processing_session_id:
+        headers["X-Processing-Session-ID"] = processing_session_id
+    if processing_run_id:
+        headers["X-Processing-Run-ID"] = processing_run_id
+    if processing_target:
+        headers["X-Processing-Target"] = processing_target
+    options = (
+        _SUPABASE_CLIENT_OPTIONS.replace(headers=headers)
+        if headers
+        else _SUPABASE_CLIENT_OPTIONS
+    )
+    return create_client(url, key, options=options)
 
 
-def _make_production_source_client():
+def _make_production_source_client(
+    processing_session_id: str | None = None,
+    processing_run_id: str | None = None,
+    processing_target: str | None = None,
+):
     if not SOURCE_PRODUCTION_URL or not SOURCE_PRODUCTION_KEY:
         raise RuntimeError("SOURCE_PRODUCTION_URL and SOURCE_PRODUCTION_KEY must be configured")
-    return _make_supabase_client(SOURCE_PRODUCTION_URL, SOURCE_PRODUCTION_KEY)
+    return _make_supabase_client(
+        SOURCE_PRODUCTION_URL,
+        SOURCE_PRODUCTION_KEY,
+        processing_session_id,
+        processing_run_id,
+        processing_target,
+    )
 
 
-def _make_production_target_client():
+def _make_production_target_client(
+    processing_session_id: str | None = None,
+    processing_run_id: str | None = None,
+    processing_target: str | None = None,
+):
     if not TARGET_PRODUCTION_URL or not TARGET_PRODUCTION_KEY:
         raise RuntimeError("TARGET_PRODUCTION_URL and TARGET_PRODUCTION_KEY must be configured")
-    return _make_supabase_client(TARGET_PRODUCTION_URL, TARGET_PRODUCTION_KEY)
+    return _make_supabase_client(
+        TARGET_PRODUCTION_URL,
+        TARGET_PRODUCTION_KEY,
+        processing_session_id,
+        processing_run_id,
+        processing_target,
+    )
 
 
-def _make_test_target_client():
+def _make_test_target_client(
+    processing_session_id: str | None = None,
+    processing_run_id: str | None = None,
+    processing_target: str | None = None,
+):
     if not TARGET_TEST_URL or not TARGET_TEST_KEY:
         raise RuntimeError("TARGET_TEST_URL and TARGET_TEST_KEY must be configured")
-    return _make_supabase_client(TARGET_TEST_URL, TARGET_TEST_KEY)
+    return _make_supabase_client(
+        TARGET_TEST_URL,
+        TARGET_TEST_KEY,
+        processing_session_id,
+        processing_run_id,
+        processing_target,
+    )
 
 
 def _target_session_exists(supabase_target, session_id: str) -> bool:
@@ -327,6 +379,10 @@ class WebhookPayload(BaseModel):
 class MapRegionRegistration(BaseModel):
     region_id: str
     bounds: list[float]
+
+
+class SessionRollbackRequest(BaseModel):
+    session_id: str
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -1019,7 +1075,7 @@ def process_trip(
     print(f"[process_trip] session={session_id} vehicle={vehicle_id} user={user_id} {start_time} → {end_time}")
 
     try:
-        _process_trip_inner(
+        _process_trip_with_audit(
             session_id,
             vehicle_id,
             user_id,
@@ -1037,6 +1093,57 @@ def process_trip(
         raise
 
 
+def _process_trip_with_audit(
+    session_id: str,
+    vehicle_id: int,
+    user_id: str,
+    start_time: str,
+    end_time: str,
+    target_role: str = "auto",
+) -> None:
+    processing_run_id = str(uuid4())
+    processing_context: dict[str, str] = {}
+    processing_error: Exception | None = None
+    try:
+        _process_trip_inner(
+            session_id,
+            vehicle_id,
+            user_id,
+            start_time,
+            end_time,
+            target_role=target_role,
+            processing_run_id=processing_run_id,
+            processing_context=processing_context,
+        )
+    except Exception as err:
+        processing_error = err
+        raise
+    finally:
+        resolved_target = processing_context.get("target_role")
+        if resolved_target:
+            try:
+                completed_at_ist = datetime.now(IST).replace(tzinfo=None).isoformat()
+                logger_targets = (
+                    [_make_test_target_client(), _make_production_target_client()]
+                    if resolved_target == "test"
+                    else [_make_production_target_client()]
+                )
+                for supabase_target in logger_targets:
+                    _execute_with_retry(
+                        supabase_target.table("logger")
+                        .update({"created_at": completed_at_ist})
+                        .eq("processing_run_id", processing_run_id)
+                    )
+            except Exception as audit_err:
+                if processing_error is not None:
+                    raise RuntimeError(
+                        f"Session {session_id} processing failed with "
+                        f"{processing_error!r}, and logger completion timestamp "
+                        f"could not be recorded: {audit_err!r}"
+                    ) from audit_err
+                raise
+
+
 def _process_trip_inner(
     session_id: str,
     vehicle_id: int,
@@ -1044,6 +1151,8 @@ def _process_trip_inner(
     start_time: str,
     end_time: str,
     target_role: str = "auto",
+    processing_run_id: str | None = None,
+    processing_context: dict[str, str] | None = None,
 ):
     supabase_source = _make_production_source_client()
     supabase_test = _make_test_target_client()
@@ -1054,11 +1163,29 @@ def _process_trip_inner(
         target_role = "production" if test_session_exists else "test"
     if target_role not in ("test", "production"):
         raise ValueError(f"Unknown processing target: {target_role}")
+    if processing_context is not None:
+        processing_context["target_role"] = target_role
 
+    supabase_source = _make_production_source_client(
+        session_id,
+        processing_run_id,
+        target_role,
+    )
+    supabase_test = _make_test_target_client(
+        session_id,
+        processing_run_id,
+        target_role,
+    )
     is_test_target = target_role == "test"
 
     supabase_target = (
-        supabase_test if is_test_target else _make_production_target_client()
+        supabase_test
+        if is_test_target
+        else _make_production_target_client(
+            session_id,
+            processing_run_id,
+            target_role,
+        )
     )
     target_flags = (
         _get_session_flags(supabase_target, session_id)
@@ -1098,7 +1225,13 @@ def _process_trip_inner(
     target_vehicle_id = vehicle_id
 
     if not already_processed and len(gps_rows) >= 2:
-        _load_map_matcher_for_trace(gps_df)
+        try:
+            _load_map_matcher_for_trace(gps_df)
+        except MapCoverageUnavailableError as err:
+            raise MapCoverageUnavailableError(
+                str(err),
+                gps_point_count=len(gps_rows),
+            ) from err
         gps_df = map_match_trip(gps_df)
         if gps_df["osm_way_id"].isna().any():
             estimated_positions = estimate_gps_positions_from_yaw(
@@ -1491,6 +1624,13 @@ def _replay_all_sessions_inner(target_role: str) -> None:
 
     try:
         if target_role == "test":
+            _execute_with_retry(
+                _make_production_target_client()
+                .table("logger")
+                .delete()
+                .eq("processing_target", "test")
+            )
+            _delete_all_rows(supabase_target, "logger", "record_id")
             for table_name, key_column in (
                 ("ledger", "ledger_id"),
                 ("hexagons", "id"),
@@ -1508,6 +1648,7 @@ def _replay_all_sessions_inner(target_role: str) -> None:
                 .not_.is_("session_id", "null")
             )
         else:
+            _delete_all_rows(supabase_target, "logger", "record_id")
             _execute_with_retry(supabase_target.rpc("reset_pipeline", {}))
             _delete_all_rows(supabase_target, "matched_gps_data", "session_id")
             _delete_all_rows(supabase_target, "geographies", "key")
@@ -1581,7 +1722,7 @@ def _process_sessions_in_order(
         )
 
         try:
-            _process_trip_inner(
+            _process_trip_with_audit(
                 session_id,
                 session["vehicle_id"],
                 session["user_id"],
@@ -1590,10 +1731,35 @@ def _process_sessions_in_order(
                 target_role=target_role,
             )
         except MapDataUnavailableError as trip_err:
+            if (
+                isinstance(trip_err, MapCoverageUnavailableError)
+                and trip_err.gps_point_count is not None
+                and trip_err.gps_point_count
+                > MAP_COVERAGE_REPLAY_HALT_GPS_POINT_THRESHOLD
+            ):
+                print(
+                    f"[{operation}:{target_role}] HALTED at session={session_id}; "
+                    f"map coverage is unavailable for a trip with "
+                    f"{trip_err.gps_point_count} GPS points "
+                    f"(limit={MAP_COVERAGE_REPLAY_HALT_GPS_POINT_THRESHOLD}): "
+                    f"{trip_err}"
+                )
+                raise RuntimeError(
+                    f"{target_role} {operation} halted at session={session_id}; "
+                    f"map coverage is unavailable for a trip with "
+                    f"{trip_err.gps_point_count} GPS points "
+                    f"(limit={MAP_COVERAGE_REPLAY_HALT_GPS_POINT_THRESHOLD}); "
+                    f"later sessions were not processed: {trip_err}"
+                ) from trip_err
             skipped_map_session_count += 1
+            gps_count_note = (
+                f" (GPS points={trip_err.gps_point_count})"
+                if trip_err.gps_point_count is not None
+                else ""
+            )
             print(
                 f"[{operation}:{target_role}] SKIPPED session={session_id} "
-                f"because map data is unavailable: {trip_err}. "
+                f"because map data is unavailable{gps_count_note}: {trip_err}. "
                 "Continuing with the next session."
             )
         except Exception as trip_err:
@@ -1697,6 +1863,49 @@ def _resume_all_production_sessions_inner():
     _resume_all_sessions_inner("production")
 
 
+@_serialize_pipeline
+def _rollback_session_inner(session_id: str, target_role: str) -> None:
+    if target_role not in ("test", "production"):
+        raise ValueError(f"Unknown rollback target: {target_role}")
+
+    source_session = _execute_with_retry(
+        _make_production_source_client()
+        .table("sessions")
+        .select("end_time")
+        .eq("session_id", session_id)
+        .limit(1)
+    )
+    if not source_session.data:
+        raise ValueError(f"Source session {session_id} was not found.")
+    session_end_time = source_session.data[0]["end_time"]
+    if session_end_time is None:
+        raise ValueError(f"Session {session_id} has no end_time.")
+
+    targets = (
+        [
+            ("test", _make_test_target_client()),
+            ("production", _make_production_target_client()),
+        ]
+        if target_role == "test"
+        else [("production", _make_production_target_client())]
+    )
+    for database_role, supabase_target in targets:
+        result = _execute_with_retry(
+            supabase_target.rpc(
+                "rollback_session_processing",
+                {
+                    "p_session_id": session_id,
+                    "p_session_end_time": session_end_time,
+                    "p_processing_target": target_role,
+                },
+            )
+        )
+        print(
+            f"[rollback:{target_role}] database={database_role} "
+            f"result={result.data!r}"
+        )
+
+
 @app.post("/replay_all_sessions/test")
 def replay_all_test_sessions(background_tasks: BackgroundTasks):
     background_tasks.add_task(_replay_all_test_sessions_inner)
@@ -1727,6 +1936,39 @@ def resume_all_production_sessions(
     _require_map_queue_api_key(x_api_key)
     background_tasks.add_task(_resume_all_production_sessions_inner)
     return {"status": "production processing resume started"}
+
+
+@app.post("/rollback_sessions/test")
+def rollback_test_sessions(
+    payload: SessionRollbackRequest,
+    background_tasks: BackgroundTasks,
+    x_api_key: str = Header(None),
+):
+    _require_map_queue_api_key(x_api_key)
+    background_tasks.add_task(
+        _rollback_session_inner,
+        payload.session_id,
+        "test",
+    )
+    return {"status": "test rollback started", "session_id": payload.session_id}
+
+
+@app.post("/rollback_sessions/production")
+def rollback_production_sessions(
+    payload: SessionRollbackRequest,
+    background_tasks: BackgroundTasks,
+    x_api_key: str = Header(None),
+):
+    _require_map_queue_api_key(x_api_key)
+    background_tasks.add_task(
+        _rollback_session_inner,
+        payload.session_id,
+        "production",
+    )
+    return {
+        "status": "production rollback started",
+        "session_id": payload.session_id,
+    }
 
 
 def _delete_all_rows(supabase_target, table_name: str, key_column: str) -> None:

@@ -10,3 +10,4 @@ migrations/*
 !migrations/20261104_add_hexagons_pass_count.sql
 !migrations/20261104_default_hexagon_confidence_to_zero.sql
 !migrations/20261104_add_session_ellar_credits.sql
+!migrations/20261115_create_logger_audit.sql

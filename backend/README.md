@@ -30,11 +30,44 @@ Each resume endpoint reads the latest target session with
 chronological order. If the target has no completed sessions, it starts with
 the earliest source session. Resume never resets target data and does not scan
 for unprocessed sessions earlier than the latest completed checkpoint. If map
-data is unavailable, resume logs and skips that session, then continues.
-Other processing failures stop the resume; triggering it again continues after
-the latest completed session.
+coverage is missing, replay/resume halts when the trip has more than 20 GPS
+points. With 20 or fewer points, it logs and skips the session, then continues.
+Other map-data failures are also logged and skipped. Other processing failures
+stop the resume; triggering it again continues after the latest completed session.
 Both resume endpoints require the `MAP_QUEUE_API_KEY` value in the
 `X-API-Key` header.
+
+## Per-session change logger
+
+Apply `migrations/20261115_create_logger_audit.sql` to both the production
+database (the shared production source/target) and the separate test target
+before deploying the logger-enabled backend. The migration installs row-level
+triggers on public tables with primary keys. Changes made by session processing
+are recorded per changed column; `row_key` identifies the affected row,
+`change_order` orders row operations, and `processing_run_id` groups one run.
+`created_at` is set to the session's processing completion time in IST.
+
+The logger records changes made after deployment. A full production or test
+replay clears that target's logger history and records the rebuilt sessions.
+Test replay also clears test-processing entries from the shared production
+logger. The change history is not a standalone snapshot: reconstruction must
+start from the database state at logger activation or the reset state of the
+most recent full replay. The migration stops if any public table to be audited
+does not have a primary key.
+
+To roll back a session and later sessions in reverse write order, call
+`POST /rollback_sessions/production` or `POST /rollback_sessions/test` with
+`X-API-Key: <MAP_QUEUE_API_KEY>` and a JSON body such as:
+
+```json
+{"session_id": "e5aecd6e-af2d-4c7f-880b-824c3743f678"}
+```
+
+Test rollback reverses test-target changes and the corresponding test
+processing updates in the shared production database. Rollback records are
+retained and marked with `rolled_back_at`; deleted session rows leave their
+original session ID in `session_id_original`. Those two database rollbacks run
+sequentially and are not one cross-database transaction.
 
 ## Regional OSM map matching
 
@@ -44,6 +77,9 @@ combined road graph before matching. The region catalog and its coverage
 rectangles are in `map_regions.py`; update the URL and bounds there whenever an
 extract is replaced or its coverage changes. The bounds must reflect the
 uploaded extract coverage, not just a city or district name.
+When replacing a PBF at the same URL, increment that region's
+`cache_revision` so running deployments do not keep using a stale local copy.
+Coimbatore's expanded bounds are configured with a new cache revision.
 
 Session and user distance totals are calculated from the selected target
 database's `matched_gps_data` rows, using consecutive fixes with a non-null
