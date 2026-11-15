@@ -382,17 +382,19 @@ const DEFAULT_CENTER = [13.05, 80.22]; // Chennai fallback
 const DEFAULT_ZOOM = 13;
 
 async function fetchIPLocation(timeoutMs = 2500) {
+  let timer;
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    timer = setTimeout(() => controller.abort(), timeoutMs);
     const res = await fetch("https://ipwho.is/", { signal: controller.signal });
-    clearTimeout(timer);
     const data = await res.json();
     if (data && data.success !== false && typeof data.latitude === "number") {
       return { lat: data.latitude, lon: data.longitude, city: data.city || null };
     }
   } catch (e) {
     console.warn("[ip-geo] falling back to default center:", e);
+  } finally {
+    clearTimeout(timer);
   }
   return null;
 }
@@ -2028,14 +2030,11 @@ export default function RoadDefectsMap() {
   useEffect(() => {
     if (mapRef.current) return;
 
-    const init = async () => {
-      const ipLoc = await fetchIPLocation();
-      const center = ipLoc ? [ipLoc.lat, ipLoc.lon] : DEFAULT_CENTER;
-      const zoom   = ipLoc ? 12 : DEFAULT_ZOOM; // IP geo is city-accurate at best, start a touch wider
-
+    const init = () => {
+      const ipLocationPromise = fetchIPLocation();
       const map = L.map(mapDivRef.current, {
-        center,
-        zoom,
+        center: DEFAULT_CENTER,
+        zoom: DEFAULT_ZOOM,
         zoomControl: false,
 
         // Continuous zoom instead of integer-only steps
@@ -2051,19 +2050,33 @@ export default function RoadDefectsMap() {
         doubleTapDragZoom: "center",
         doubleTapDragZoomOptions: { reverse: true },
       });
+      let mapInteracted = false;
+      let initialViewportLoaded = false;
+      let moveTimer = null;
+      map.on("movestart", () => {
+        mapInteracted = true;
+      });
+      map.on("zoomstart", () => {
+        mapInteracted = true;
+      });
 
       L.control.zoom({ position: "bottomright" }).addTo(map);
 
+      const tileOptions = {
+        subdomains: "abcd",
+        maxZoom: 20,
+        updateWhenZooming: false,
+      };
       L.tileLayer(
         "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=cb1_2gzd_1_d14af46dbfbc5d8f214caf08",
-        { attribution: "© OpenStreetMap contributors © CARTO", subdomains: "abcd", maxZoom: 20 }
+        { ...tileOptions, attribution: "© OpenStreetMap contributors © CARTO" }
       ).addTo(map);
 
       map.createPane("labelsPane");
       map.getPane("labelsPane").style.zIndex = "250";
       L.tileLayer(
         "https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png?key=cb1_2gzd_1_d14af46dbfbc5d8f214caf08",
-        { subdomains: "abcd", maxZoom: 20, pane: "labelsPane" }
+        { ...tileOptions, pane: "labelsPane" }
       ).addTo(map);
       
       MERCHANT_LOCATIONS.forEach((m) => {
@@ -2078,17 +2091,31 @@ export default function RoadDefectsMap() {
       });
 
       mapRef.current = map;
+      ipLocationPromise.then((ipLoc) => {
+        if (mapRef.current !== map) return;
+        if (ipLoc && !mapInteracted) {
+          map.setView([ipLoc.lat, ipLoc.lon], 12, { animate: false });
+        }
+        setTimeout(() => {
+          if (mapRef.current !== map || initialViewportLoaded) return;
+          initialViewportLoaded = true;
+          clearTimeout(moveTimer);
+          map.invalidateSize();
+          loadViewport();
+        }, 100);
+      });
 
       setTimeout(() => {
         map.invalidateSize();
-        loadViewport();
         loadGlobalLastDetected();
       }, 100);
 
-      let moveTimer = null;
       map.on("moveend", () => {
         clearTimeout(moveTimer);
-        moveTimer = setTimeout(loadViewport, 300);
+        moveTimer = setTimeout(() => {
+          initialViewportLoaded = true;
+          loadViewport();
+        }, 300);
       });
     };
 
