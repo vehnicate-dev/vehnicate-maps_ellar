@@ -23,6 +23,19 @@ database before enabling processing. `/replay_all_sessions/test` and
 `/replay_all_sessions/production` replay into only their named target; each
 replay resets derived data in that target before processing.
 
+To continue without resetting existing results, call
+`POST /resume_all_sessions/test` or `POST /resume_all_sessions/production`.
+Each resume endpoint reads the latest target session with
+`aliv_processed=true` and processes source sessions after that checkpoint in
+chronological order. If the target has no completed sessions, it starts with
+the earliest source session. Resume never resets target data and does not scan
+for unprocessed sessions earlier than the latest completed checkpoint. If map
+data is unavailable, resume stops at that session so it can be retried after
+map coverage is fixed. Other processing failures also stop the resume;
+triggering it again continues after the latest completed session.
+Both resume endpoints require the `MAP_QUEUE_API_KEY` value in the
+`X-API-Key` header.
+
 ## Regional OSM map matching
 
 The backend selects OSM extracts from the full GPS trace, downloads only the
@@ -77,5 +90,7 @@ restarts; add frequently used regions to `map_regions.py` for permanent
 configuration. The endpoint retries the blocked session first; later queued
 sessions remain behind it. The queue is in memory, so do not restart/redeploy
 the service while it is halted or pending sessions will be lost. Bulk replay
-also halts at the first session whose map coverage is unavailable; it does not
-continue to later sessions.
+logs and skips sessions whose map data is unavailable, then continues in
+chronological order. A skipped session remains unprocessed and should be
+retried after its map coverage is configured; other processing failures still
+halt the replay.

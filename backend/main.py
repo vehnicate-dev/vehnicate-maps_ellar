@@ -1560,19 +1560,25 @@ def _replay_all_sessions_inner(target_role: str) -> None:
     except Exception as err:
         raise RuntimeError(f"Failed to reset {target_role} replay target: {err!r}") from err
 
+    _process_sessions_in_order(
+        sessions,
+        target_role,
+        operation="replay",
+    )
+
+
+def _process_sessions_in_order(
+    sessions: list[dict],
+    target_role: str,
+    operation: str,
+) -> None:
+    skipped_map_session_count = 0
     for i, session in enumerate(sessions):
         session_id = session["session_id"]
         print(
-            f"[replay:{target_role}] ({i + 1}/{len(sessions)}) "
+            f"[{operation}:{target_role}] ({i + 1}/{len(sessions)}) "
             f"session={session_id} end_time={session['end_time']}"
         )
-
-        if target_role == "production":
-            _execute_with_retry(
-                supabase_target.table("sessions")
-                .update({"distance": 0, "aliv_processed": False, "imu_only": True})
-                .eq("session_id", session_id)
-            )
 
         try:
             _process_trip_inner(
@@ -1583,24 +1589,102 @@ def _replay_all_sessions_inner(target_role: str) -> None:
                 session["end_time"],
                 target_role=target_role,
             )
-        except Exception as trip_err:
-            if isinstance(trip_err, MapDataUnavailableError):
+        except MapDataUnavailableError as trip_err:
+            if operation == "resume":
+                print(
+                    f"[resume:{target_role}] HALTED at session={session_id}; "
+                    f"map data is unavailable: {trip_err}"
+                )
                 raise RuntimeError(
-                    f"{target_role} replay halted at session={session_id}; "
-                    "later sessions were not processed because map coverage "
-                    f"is unavailable: {trip_err}"
+                    f"{target_role} resume halted at session={session_id} "
+                    "because map data is unavailable. Fix map coverage and "
+                    f"trigger resume again: {trip_err}"
                 ) from trip_err
+            skipped_map_session_count += 1
             print(
-                f"[replay:{target_role}] HALTED at session {session_id} "
+                f"[{operation}:{target_role}] SKIPPED session={session_id} "
+                f"because map data is unavailable: {trip_err}. "
+                "Continuing with the next session."
+            )
+        except Exception as trip_err:
+            print(
+                f"[{operation}:{target_role}] HALTED at session {session_id} "
                 "after processing failure: "
                 f"{trip_err!r}"
             )
             raise RuntimeError(
-                f"{target_role} replay halted at session={session_id}; "
+                f"{target_role} {operation} halted at session={session_id}; "
                 "later sessions were not processed to preserve chronological "
                 f"processing order: {trip_err!r}"
             ) from trip_err
-    print(f"[replay:{target_role}] finished replaying all sessions.")
+    print(
+        f"[{operation}:{target_role}] finished processing sessions; "
+        f"skipped {skipped_map_session_count} session(s) for unavailable map data."
+    )
+
+
+@_serialize_pipeline
+def _resume_all_sessions_inner(target_role: str) -> None:
+    if target_role not in ("test", "production"):
+        raise ValueError(f"Unknown resume target: {target_role}")
+    with _trip_state_lock:
+        if _blocked_trip is not None:
+            raise RuntimeError(
+                f"Cannot resume {target_role} processing while live queue is "
+                f"halted at session={_blocked_trip[0]} for missing map data."
+            )
+
+    supabase_source = _make_production_source_client()
+    supabase_target = (
+        _make_test_target_client()
+        if target_role == "test"
+        else _make_production_target_client()
+    )
+    completed_sessions = fetch_all_pages(
+        supabase_target,
+        table="sessions",
+        filters=[
+            ("eq", "aliv_processed", True),
+            ("filter", "end_time", "not.is", "null"),
+        ],
+        order_col="end_time",
+        tiebreak_col="session_id",
+    )
+    source_filters = [("filter", "end_time", "not.is", "null")]
+    if completed_sessions:
+        last_completed = completed_sessions[-1]
+        source_filters.append((
+            "or_",
+            f"end_time.gt.{last_completed['end_time']},"
+            "and("
+            f"end_time.eq.{last_completed['end_time']},"
+            f"session_id.gt.{last_completed['session_id']}"
+            ")",
+        ))
+        print(
+            f"[resume:{target_role}] continuing after "
+            f"session={last_completed['session_id']} "
+            f"end_time={last_completed['end_time']}"
+        )
+    else:
+        print(
+            f"[resume:{target_role}] no completed checkpoint found; "
+            "starting from the earliest source session."
+        )
+
+    sessions = fetch_all_pages(
+        supabase_source,
+        table="sessions",
+        filters=source_filters,
+        order_col="end_time",
+        tiebreak_col="session_id",
+    )
+    print(f"[resume:{target_role}] {len(sessions)} session(s) to process.")
+    _process_sessions_in_order(
+        sessions,
+        target_role,
+        operation="resume",
+    )
 
 
 @_serialize_pipeline
@@ -1613,6 +1697,16 @@ def _replay_all_production_sessions_inner():
     _replay_all_sessions_inner("production")
 
 
+@_serialize_pipeline
+def _resume_all_test_sessions_inner():
+    _resume_all_sessions_inner("test")
+
+
+@_serialize_pipeline
+def _resume_all_production_sessions_inner():
+    _resume_all_sessions_inner("production")
+
+
 @app.post("/replay_all_sessions/test")
 def replay_all_test_sessions(background_tasks: BackgroundTasks):
     background_tasks.add_task(_replay_all_test_sessions_inner)
@@ -1623,6 +1717,26 @@ def replay_all_test_sessions(background_tasks: BackgroundTasks):
 def replay_all_production_sessions(background_tasks: BackgroundTasks):
     background_tasks.add_task(_replay_all_production_sessions_inner)
     return {"status": "production replay started"}
+
+
+@app.post("/resume_all_sessions/test")
+def resume_all_test_sessions(
+    background_tasks: BackgroundTasks,
+    x_api_key: str = Header(None),
+):
+    _require_map_queue_api_key(x_api_key)
+    background_tasks.add_task(_resume_all_test_sessions_inner)
+    return {"status": "test processing resume started"}
+
+
+@app.post("/resume_all_sessions/production")
+def resume_all_production_sessions(
+    background_tasks: BackgroundTasks,
+    x_api_key: str = Header(None),
+):
+    _require_map_queue_api_key(x_api_key)
+    background_tasks.add_task(_resume_all_production_sessions_inner)
+    return {"status": "production processing resume started"}
 
 
 def _delete_all_rows(supabase_target, table_name: str, key_column: str) -> None:
