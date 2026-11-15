@@ -41,19 +41,25 @@ Both resume endpoints require the `MAP_QUEUE_API_KEY` value in the
 
 Apply `migrations/20261115_create_logger_audit.sql` to both the production
 database (the shared production source/target) and the separate test target
-before deploying the logger-enabled backend. The migration installs row-level
+before deploying the logger-enabled backend. Reapplying the migration also
+drops the old `processing_target` column and updates the rollback function;
+existing logger rows are retained, but their old target labels are discarded.
+The migration installs row-level
 triggers on public tables with primary keys. Changes made by session processing
 are recorded per changed column; `row_key` identifies the affected row,
 `change_order` orders row operations, and `processing_run_id` groups one run.
 `created_at` is set to the session's processing completion time in IST.
+Each database keeps its own logger, so the logger table has no
+`processing_target` column. Test processing writes are logged in the test
+database; updates to `test_db_processed` in the shared production source are
+reconciled from test-session existence after a rollback.
 
 The logger records changes made after deployment. A full production or test
 replay clears that target's logger history and records the rebuilt sessions.
-Test replay also clears test-processing entries from the shared production
-logger. The change history is not a standalone snapshot: reconstruction must
-start from the database state at logger activation or the reset state of the
-most recent full replay. The migration stops if any public table to be audited
-does not have a primary key.
+The change history is not a standalone snapshot: reconstruction must start
+from the database state at logger activation or the reset state of the most
+recent full replay. The migration stops if any public table to be audited does
+not have a primary key.
 
 To roll back a session and later sessions in reverse write order, call
 `POST /rollback_sessions/production` or `POST /rollback_sessions/test` with
@@ -63,11 +69,13 @@ To roll back a session and later sessions in reverse write order, call
 {"session_id": "e5aecd6e-af2d-4c7f-880b-824c3743f678"}
 ```
 
-Test rollback reverses test-target changes and the corresponding test
-processing updates in the shared production database. Rollback records are
-retained and marked with `rolled_back_at`; deleted session rows leave their
-original session ID in `session_id_original`. Those two database rollbacks run
-sequentially and are not one cross-database transaction.
+Rollback runs against the selected database's logger; test rollback then
+reconciles `test_db_processed` in the shared production source from the
+sessions that remain in the test database. Rollback records are retained and
+marked with `rolled_back_at`; deleted session rows leave their original
+session ID in `session_id_original`. The test-database rollback and subsequent
+source-flag reconciliation are separate operations, not one cross-database
+transaction.
 
 ## Regional OSM map matching
 
@@ -120,6 +128,8 @@ Its `bounds` are `[min_lon, min_lat, max_lon, max_lat]`:
 
 1. Configure a secret `MAP_QUEUE_API_KEY` in Railway.
 2. Call the relevant endpoint with that value in the `X-API-Key` header.
+Sessions with fewer than five GPS points are skipped before IMU retrieval or
+map-extract loading; an existing target session is marked processed.
 
 Region registrations made through the endpoint last only until the process
 restarts; add frequently used regions to `map_regions.py` for permanent

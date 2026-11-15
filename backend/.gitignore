@@ -3,6 +3,7 @@ yaw.py
 backfill_jerk_values.py
 tests/*
 !tests/test_gps_yaw.py
+!tests/test_map_regions.py
 !tests/test_replay.py
 migrations/*
 !migrations/20261022_add_session_data_processing_indexes.sql

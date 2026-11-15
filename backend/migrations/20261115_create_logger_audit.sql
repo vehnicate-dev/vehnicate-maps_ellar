@@ -5,7 +5,6 @@ CREATE TABLE IF NOT EXISTS public.logger (
     session_id character varying
         REFERENCES public.sessions(session_id) ON DELETE SET NULL,
     session_id_original character varying NOT NULL,
-    processing_target text NOT NULL CHECK (processing_target IN ('test', 'production')),
     processing_run_id uuid NOT NULL,
     change_order bigint NOT NULL,
     table_name text NOT NULL,
@@ -19,8 +18,11 @@ CREATE TABLE IF NOT EXISTS public.logger (
     rolled_back_at timestamp without time zone
 );
 
+DROP INDEX IF EXISTS public.logger_session_order_idx;
+ALTER TABLE public.logger DROP COLUMN IF EXISTS processing_target;
+
 CREATE INDEX IF NOT EXISTS logger_session_order_idx
-    ON public.logger (session_id_original, processing_target, change_order);
+    ON public.logger (session_id_original, change_order);
 CREATE INDEX IF NOT EXISTS logger_run_idx
     ON public.logger (processing_run_id);
 
@@ -138,7 +140,6 @@ BEGIN
                 INSERT INTO public.logger (
                     session_id,
                     session_id_original,
-                    processing_target,
                     processing_run_id,
                     change_order,
                     table_name,
@@ -151,7 +152,6 @@ BEGIN
                 VALUES (
                     processing_session,
                     processing_session,
-                    processing_target_name,
                     processing_run,
                     row_change_order,
                     TG_TABLE_NAME,
@@ -171,7 +171,6 @@ BEGIN
             INSERT INTO public.logger (
                 session_id,
                 session_id_original,
-                processing_target,
                 processing_run_id,
                 change_order,
                 table_name,
@@ -184,7 +183,6 @@ BEGIN
             VALUES (
                 processing_session,
                 processing_session,
-                processing_target_name,
                 processing_run,
                 row_change_order,
                 TG_TABLE_NAME,
@@ -255,6 +253,17 @@ BEGIN
 END;
 $block$;
 
+DROP FUNCTION IF EXISTS public.rollback_session_processing(
+    character varying,
+    timestamp with time zone,
+    text
+);
+DROP FUNCTION IF EXISTS public.rollback_session_processing(
+    uuid,
+    timestamp with time zone,
+    text
+);
+
 CREATE OR REPLACE FUNCTION public.rollback_session_processing(
     p_session_id character varying,
     p_session_end_time timestamp with time zone,
@@ -290,7 +299,6 @@ BEGIN
      WHERE session_row.session_id = log_entry.session_id_original
        AND (session_row.end_time::timestamp with time zone, session_row.session_id)
            >= (p_session_end_time, p_session_id)
-       AND log_entry.processing_target = p_processing_target
        AND log_entry.rolled_back_at IS NULL;
 
     FOR rollback_event IN
@@ -308,7 +316,6 @@ BEGIN
             ON session_row.session_id = log_entry.session_id_original
          WHERE (session_row.end_time::timestamp with time zone, session_row.session_id)
                >= (p_session_end_time, p_session_id)
-           AND log_entry.processing_target = p_processing_target
            AND log_entry.rolled_back_at = rollback_time
          GROUP BY
             log_entry.change_order,

@@ -122,6 +122,7 @@ ANGLE_THRESHOLD_DEG       = 35.0  # |mount yaw offset| beyond this → imu_only 
 MIN_ACCEL_ENERGY          = 5.0   # sum(|a_gps|) needed across the trip before trusting the estimate
 GRAVITY_LOWPASS_WINDOW_S  = 1.5   # rolling window used to separate gravity from user_accel noise
 MIN_COHERENCE = 0.1  # su,sv vector magnitude / energy — below this, the direction estimate is noise-dominated
+MIN_GPS_POINTS_FOR_MAP_MATCHING = 5
 MIN_GPS_POINTS = 10  # fewer raw fixes than this → skip Aliv (matched distance is still calculated)
 MIN_TRIP_DISTANCE_M = 50  # trips that moved less than this overall aren't worth map-matching/Aliv
 # Prevent vehicle-distance triggers from underflowing below zero during replay resets.
@@ -240,6 +241,7 @@ def _load_map_matcher_for_trace(gps_df: pd.DataFrame) -> None:
 _SUPABASE_CLIENT_OPTIONS = ClientOptions(
     httpx_client=httpx.Client(http2=False, timeout=30.0),
 )
+_LOGGER_STAMP_BATCH_SIZE = 500
 
 
 def _make_supabase_client(
@@ -355,6 +357,37 @@ def _execute_with_retry(query, attempts: int = 3, backoff_s: float = 0.5):
             if attempt < attempts:
                 time.sleep(backoff_s * attempt)
     raise last_err
+
+
+def _stamp_processing_run_completion(
+    supabase_target,
+    processing_run_id: str,
+    completed_at: str,
+) -> int:
+    offset = 0
+    stamped_count = 0
+    while True:
+        response = _execute_with_retry(
+            supabase_target.table("logger")
+            .select("record_id")
+            .eq("processing_run_id", processing_run_id)
+            .order("record_id")
+            .range(offset, offset + _LOGGER_STAMP_BATCH_SIZE - 1)
+        )
+        record_ids = [
+            row["record_id"]
+            for row in (response.data or [])
+        ]
+        if not record_ids:
+            return stamped_count
+
+        _execute_with_retry(
+            supabase_target.table("logger")
+            .update({"created_at": completed_at})
+            .in_("record_id", record_ids)
+        )
+        stamped_count += len(record_ids)
+        offset += len(record_ids)
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
@@ -1124,15 +1157,19 @@ def _process_trip_with_audit(
             try:
                 completed_at_ist = datetime.now(IST).replace(tzinfo=None).isoformat()
                 logger_targets = (
-                    [_make_test_target_client(), _make_production_target_client()]
+                    [_make_test_target_client()]
                     if resolved_target == "test"
                     else [_make_production_target_client()]
                 )
                 for supabase_target in logger_targets:
-                    _execute_with_retry(
-                        supabase_target.table("logger")
-                        .update({"created_at": completed_at_ist})
-                        .eq("processing_run_id", processing_run_id)
+                    stamped_count = _stamp_processing_run_completion(
+                        supabase_target,
+                        processing_run_id,
+                        completed_at_ist,
+                    )
+                    print(
+                        f"[logger] stamped {stamped_count} row(s) for "
+                        f"run={processing_run_id}"
                     )
             except Exception as audit_err:
                 if processing_error is not None:
@@ -1166,10 +1203,14 @@ def _process_trip_inner(
     if processing_context is not None:
         processing_context["target_role"] = target_role
 
-    supabase_source = _make_production_source_client(
-        session_id,
-        processing_run_id,
-        target_role,
+    supabase_source = (
+        _make_production_source_client(
+            session_id,
+            processing_run_id,
+            target_role,
+        )
+        if target_role == "production"
+        else _make_production_source_client()
     )
     supabase_test = _make_test_target_client(
         session_id,
@@ -1208,17 +1249,30 @@ def _process_trip_inner(
             sslmode="require",
         )
     ) as source_db:
-        imu_rows = fetch_sensor_rows(source_db, "imu_data", session_id)
-        print(f"[process_trip] IMU rows fetched: {len(imu_rows)}")
-        if not imu_rows:
-            print("[process_trip] No IMU data, skipping.")
-            return
-
-        # ── 2. Fetch GPS data ──────────────────────────────────────────────────
         gps_rows = fetch_sensor_rows(source_db, "gps_data", session_id)
-    print(f"[process_trip] GPS rows fetched: {len(gps_rows)}")
-    if not gps_rows:
-        print("[process_trip] No GPS data, skipping.")
+        print(f"[process_trip] GPS rows fetched: {len(gps_rows)}")
+        imu_rows = (
+            fetch_sensor_rows(source_db, "imu_data", session_id)
+            if len(gps_rows) >= MIN_GPS_POINTS_FOR_MAP_MATCHING
+            else []
+        )
+
+    if len(gps_rows) < MIN_GPS_POINTS_FOR_MAP_MATCHING:
+        print(
+            f"[process_trip] Only {len(gps_rows)} GPS points "
+            f"(< {MIN_GPS_POINTS_FOR_MAP_MATCHING}); skipping session without "
+            "map matching."
+        )
+        if test_session_exists:
+            _set_test_db_processed(supabase_source, session_id, True)
+        elif not is_test_target:
+            _set_test_db_processed(supabase_source, session_id, False)
+        _mark_aliv_processed(session_store, session_id)
+        return
+
+    print(f"[process_trip] IMU rows fetched: {len(imu_rows)}")
+    if not imu_rows:
+        print("[process_trip] No IMU data, skipping.")
         return
 
     gps_df = pd.DataFrame(gps_rows)
@@ -1624,12 +1678,6 @@ def _replay_all_sessions_inner(target_role: str) -> None:
 
     try:
         if target_role == "test":
-            _execute_with_retry(
-                _make_production_target_client()
-                .table("logger")
-                .delete()
-                .eq("processing_target", "test")
-            )
             _delete_all_rows(supabase_target, "logger", "record_id")
             for table_name, key_column in (
                 ("ledger", "ledger_id"),
@@ -1863,14 +1911,54 @@ def _resume_all_production_sessions_inner():
     _resume_all_sessions_inner("production")
 
 
+def _sync_test_db_processed_flags(
+    supabase_source,
+    supabase_test,
+    session_ids: list[str],
+) -> None:
+    batch_size = 500
+    for offset in range(0, len(session_ids), batch_size):
+        session_batch = session_ids[offset:offset + batch_size]
+        test_rows = _execute_with_retry(
+            supabase_test.table("sessions")
+            .select("session_id")
+            .in_("session_id", session_batch)
+        )
+        test_session_ids = {
+            row["session_id"] for row in (test_rows.data or [])
+        }
+        present_ids = [
+            session_id
+            for session_id in session_batch
+            if session_id in test_session_ids
+        ]
+        absent_ids = [
+            session_id
+            for session_id in session_batch
+            if session_id not in test_session_ids
+        ]
+        if present_ids:
+            _execute_with_retry(
+                supabase_source.table("sessions")
+                .update({"test_db_processed": True})
+                .in_("session_id", present_ids)
+            )
+        if absent_ids:
+            _execute_with_retry(
+                supabase_source.table("sessions")
+                .update({"test_db_processed": False})
+                .in_("session_id", absent_ids)
+            )
+
+
 @_serialize_pipeline
 def _rollback_session_inner(session_id: str, target_role: str) -> None:
     if target_role not in ("test", "production"):
         raise ValueError(f"Unknown rollback target: {target_role}")
 
+    supabase_source = _make_production_source_client()
     source_session = _execute_with_retry(
-        _make_production_source_client()
-        .table("sessions")
+        supabase_source.table("sessions")
         .select("end_time")
         .eq("session_id", session_id)
         .limit(1)
@@ -1881,29 +1969,51 @@ def _rollback_session_inner(session_id: str, target_role: str) -> None:
     if session_end_time is None:
         raise ValueError(f"Session {session_id} has no end_time.")
 
-    targets = (
-        [
-            ("test", _make_test_target_client()),
-            ("production", _make_production_target_client()),
-        ]
-        if target_role == "test"
-        else [("production", _make_production_target_client())]
+    affected_sessions = fetch_all_pages(
+        supabase_source,
+        table="sessions",
+        filters=[
+            ("filter", "end_time", "not.is", "null"),
+            (
+                "or_",
+                f"end_time.gt.{session_end_time},"
+                "and("
+                f"end_time.eq.{session_end_time},"
+                f"session_id.gte.{session_id}"
+                ")",
+            ),
+        ],
+        order_col="end_time",
+        tiebreak_col="session_id",
     )
-    for database_role, supabase_target in targets:
-        result = _execute_with_retry(
-            supabase_target.rpc(
-                "rollback_session_processing",
-                {
-                    "p_session_id": session_id,
-                    "p_session_end_time": session_end_time,
-                    "p_processing_target": target_role,
-                },
-            )
+    supabase_target = (
+        _make_test_target_client()
+        if target_role == "test"
+        else _make_production_target_client()
+    )
+    result = _execute_with_retry(
+        supabase_target.rpc(
+            "rollback_session_processing",
+            {
+                "p_session_id": session_id,
+                "p_session_end_time": session_end_time,
+                "p_processing_target": target_role,
+            },
         )
-        print(
-            f"[rollback:{target_role}] database={database_role} "
-            f"result={result.data!r}"
-        )
+    )
+    print(
+        f"[rollback:{target_role}] database={target_role} "
+        f"result={result.data!r}"
+    )
+
+    affected_session_ids = [
+        row["session_id"] for row in affected_sessions
+    ]
+    _sync_test_db_processed_flags(
+        supabase_source,
+        _make_test_target_client(),
+        affected_session_ids,
+    )
 
 
 @app.post("/replay_all_sessions/test")
