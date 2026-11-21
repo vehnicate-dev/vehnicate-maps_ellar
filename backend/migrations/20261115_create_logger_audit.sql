@@ -69,6 +69,7 @@ AS $function$
 DECLARE
     request_headers jsonb;
     processing_session character varying;
+    processing_session_fk character varying;
     processing_run uuid;
     processing_target_name text;
     old_row jsonb;
@@ -93,6 +94,10 @@ BEGIN
     )::jsonb;
     processing_session :=
         NULLIF(request_headers ->> 'x-processing-session-id', '');
+    SELECT session_row.session_id
+      INTO processing_session_fk
+      FROM public.sessions AS session_row
+     WHERE session_row.session_id = processing_session;
     processing_run :=
         NULLIF(request_headers ->> 'x-processing-run-id', '')::uuid;
     processing_target_name :=
@@ -150,7 +155,7 @@ BEGIN
                     value_after
                 )
                 VALUES (
-                    processing_session,
+                    processing_session_fk,
                     processing_session,
                     processing_run,
                     row_change_order,
@@ -181,7 +186,7 @@ BEGIN
                 value_after
             )
             VALUES (
-                processing_session,
+                processing_session_fk,
                 processing_session,
                 processing_run,
                 row_change_order,

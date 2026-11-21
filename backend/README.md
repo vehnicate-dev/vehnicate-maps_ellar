@@ -48,6 +48,9 @@ The migration installs row-level
 triggers on public tables with primary keys. Changes made by session processing
 are recorded per changed column; `row_key` identifies the affected row,
 `change_order` orders row operations, and `processing_run_id` groups one run.
+`logger.session_id` references a session only when that session exists in the
+target database; `session_id_original` always retains the processing session
+ID, including for changes made before a test-target session is copied.
 `created_at` is set to the session's processing completion time in IST.
 Each database keeps its own logger, so the logger table has no
 `processing_target` column. Test processing writes are logged in the test
