@@ -1107,6 +1107,28 @@ const styles = `
     gap: 10px;
   }
 
+  #rdm-sign-in {
+    height: 42px;
+    padding: 0 16px;
+    border-radius: 22px;
+    background: linear-gradient(135deg, #ec4899, #8b5cf6);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: filter 0.2s ease, transform 0.2s ease;
+  }
+  #rdm-sign-in:hover {
+    filter: brightness(0.9);
+    transform: translateY(-1px);
+  }
+
   /* ── Theme toggle ── */
   #rdm-theme-toggle {
     position: relative;
@@ -1362,6 +1384,13 @@ const styles = `
       font-size: 18px;
     }
 
+    #rdm-sign-in {
+      height: 40px;
+      padding: 0 10px;
+      border-radius: 14px;
+      font-size: 12px;
+    }
+
     /* Theme toggle — slightly smaller */
     #rdm-theme-toggle {
       width: 28px;
@@ -1382,7 +1411,7 @@ const styles = `
       position: absolute;
       top: 14px;
       left: 12px;
-      right: 92px;    /* controls area is ~80px wide + 12px right margin */
+      right: 156px;   /* controls area includes sign in, refresh, and theme toggle */
       width: auto;
       transform: none;
     }
@@ -2478,6 +2507,13 @@ export default function RoadDefectsMap() {
 
         {/* Controls: theme toggle + refresh (desktop: top-right row; mobile: same but icon-only refresh) */}
         <div id="rdm-controls-row">
+          <a
+            id="rdm-sign-in"
+            href="https://dashboard.vehnicate.com/"
+            aria-label="Sign in to Vehnicate"
+          >
+            Sign in
+          </a>
           <div
             id="rdm-theme-toggle"
             ref={toggleBtnRef}

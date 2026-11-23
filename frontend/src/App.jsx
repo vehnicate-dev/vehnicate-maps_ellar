@@ -20,6 +20,7 @@ import { Analytics } from "@vercel/analytics/react";
 const TIMES_FONT = {
   fontFamily: '"Times New Roman", Times, serif',
 };
+const SPLASH_SESSION_KEY = "vehnicateSplashPlayed";
 
 function SplashScreen({ onComplete }) {
   const [phase, setPhase] = useState("full");
@@ -584,19 +585,53 @@ function PageWrapper({ children }) {
  */
 
 function App() {
+  const location = useLocation();
+  const initialLocationKey = useRef(location.key);
   const [showSplash, setShowSplash] = useState(() => {
-    // Show splash when the site is opened/reloaded directly.
-    // Internal navigation will not show it again.
-    return !window.__appAlreadyLoaded;
+    const navigationType = window.performance
+      .getEntriesByType("navigation")[0]?.type;
+
+    return (
+      !window.__appAlreadyLoaded &&
+      window.sessionStorage.getItem(SPLASH_SESSION_KEY) !== "played" &&
+      navigationType !== "back_forward"
+    );
   });
 
   const handleSplashComplete = useCallback(() => {
+    const wasComplete = window.__splashDone;
     window.__splashDone = true;
     window.__appAlreadyLoaded = true;
+    window.sessionStorage.setItem(SPLASH_SESSION_KEY, "played");
 
-    window.dispatchEvent(new Event("splash-complete"));
+    if (!wasComplete) {
+      window.dispatchEvent(new Event("splash-complete"));
+    }
     setShowSplash(false);
   }, []);
+
+  useEffect(() => {
+    if (!showSplash) {
+      handleSplashComplete();
+    }
+  }, [handleSplashComplete, showSplash]);
+
+  useEffect(() => {
+    if (location.key !== initialLocationKey.current) {
+      handleSplashComplete();
+    }
+  }, [handleSplashComplete, location.key]);
+
+  useEffect(() => {
+    const handlePageShow = (event) => {
+      if (event.persisted) {
+        handleSplashComplete();
+      }
+    };
+
+    window.addEventListener("pageshow", handlePageShow);
+    return () => window.removeEventListener("pageshow", handlePageShow);
+  }, [handleSplashComplete]);
 
   useEffect(() => {
     const lenis = new Lenis({

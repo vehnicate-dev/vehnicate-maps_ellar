@@ -182,7 +182,12 @@ const useSplashDone = () => {
     const onSplashComplete = () => {
       id = setTimeout(() => setDone(true), 600); // wait for the splash fade-out
     };
-    window.addEventListener("splash-complete", onSplashComplete, { once: true });
+    if (window.__splashDone) {
+      onSplashComplete();
+    } else {
+      window.addEventListener("splash-complete", onSplashComplete, { once: true });
+    }
+
     return () => {
       clearTimeout(id);
       window.removeEventListener("splash-complete", onSplashComplete);
@@ -664,6 +669,27 @@ const Hero = () => {
 
                 <span className="text-xs sm:text-sm font-medium text-purple-300 underline underline-offset-4 decoration-purple-400/50 group-hover:text-pink-400 group-hover:decoration-pink-400/60 transition-colors duration-300">
                   drive &amp; earn Ellars!
+                </span>
+              </motion.a>
+
+              {/* Analytics dashboard */}
+              <motion.a
+                href="https://dashboard.vehnicate.com/"
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.44, duration: 0.8 }}
+                whileHover={{ y: -2 }}
+                whileTap={{ scale: 0.97 }}
+                className="group inline-flex items-center px-4 py-2 bg-white/[0.035] border border-white/10 rounded-2xl backdrop-blur-sm hover:bg-white/[0.06] hover:border-white/20 transition-all duration-300 cursor-pointer"
+              >
+                <span className="text-xs sm:text-sm font-medium text-purple-300 underline underline-offset-4 decoration-purple-400/50 group-hover:text-pink-400 group-hover:decoration-pink-400/60 transition-colors duration-300">
+                  detailed user analytics is now live
+                </span>
+
+                <span className="mx-2 w-1 h-1 rounded-full bg-white/70 shrink-0" />
+
+                <span className="text-xs sm:text-sm font-medium text-purple-300 underline underline-offset-4 decoration-purple-400/50 group-hover:text-pink-400 group-hover:decoration-pink-400/60 transition-colors duration-300">
+                  explore!
                 </span>
               </motion.a>
             </div>

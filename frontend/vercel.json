@@ -1,4 +1,11 @@
 {
+  "redirects": [
+    {
+      "source": "/dashboard",
+      "destination": "https://dashboard.vehnicate.com/",
+      "permanent": false
+    }
+  ],
   "rewrites": [
     { "source": "/(.*)", "destination": "/" }
   ],
